@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+KOMARI_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/komari-ha"
+
+export PATH="$HOME/.local/bin:$PATH"
+export UV_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/uv"
+export UV_PROJECT_ENVIRONMENT="$KOMARI_DATA_HOME/.venv"
+
+cd "$PROJECT_ROOT"

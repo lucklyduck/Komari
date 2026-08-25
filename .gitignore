@@ -1,0 +1,39 @@
+# Python and uv
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.python-version
+
+# Test and quality-tool output
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+
+# Build output
+build/
+dist/
+
+# Home Assistant development runtime
+.ha-config/
+config/
+deps/
+home-assistant.log*
+OZW_Log.txt
+
+# Editors and operating systems
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local secrets and ad-hoc environment files
+.env
+.env.*
+!.env.example

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+source "$(dirname -- "${BASH_SOURCE[0]}")/_common"
+
+HA_CONFIG_DIR="$KOMARI_DATA_HOME/config"
+COMPONENTS_DIR="$HA_CONFIG_DIR/custom_components"
+COMPONENT_LINK="$COMPONENTS_DIR/komari"
+COMPONENT_SOURCE="$PROJECT_ROOT/custom_components/komari"
+
+mkdir -p "$COMPONENTS_DIR"
+
+if [[ -L "$COMPONENT_LINK" ]]; then
+    rm -- "$COMPONENT_LINK"
+elif [[ -e "$COMPONENT_LINK" ]]; then
+    echo "Refusing to replace non-symlink path: $COMPONENT_LINK" >&2
+    exit 1
+fi
+
+ln -s "$COMPONENT_SOURCE" "$COMPONENT_LINK"
+exec uv run hass -c "$HA_CONFIG_DIR" "$@"
