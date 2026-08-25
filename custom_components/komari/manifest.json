@@ -1,0 +1,12 @@
+{
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://komari-monitor.github.io/komari-document/",
+  "domain": "komari",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "name": "Komari",
+  "requirements": [],
+  "version": "0.1.0-alpha.1"
+}

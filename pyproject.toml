@@ -77,5 +77,3 @@ typeCheckingMode = "standard"
 reportMissingTypeStubs = false
 reportUnknownMemberType = false
 reportUnknownVariableType = false
-venv = ".venv"
-venvPath = "."

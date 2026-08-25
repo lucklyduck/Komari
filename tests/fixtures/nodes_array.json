@@ -1,0 +1,19 @@
+[
+  {
+    "arch": "amd64",
+    "auto_renewal": true,
+    "billing_cycle": 30,
+    "cpu_cores": 4,
+    "cpu_name": "Example CPU",
+    "disk_total": 107374182400,
+    "expired_at": "2027-01-02T03:04:05Z",
+    "mem_total": 8589934592,
+    "name": "Example node",
+    "os": "Example Linux",
+    "swap_total": 2147483648,
+    "traffic_limit": 1099511627776,
+    "traffic_limit_type": "sum",
+    "uuid": "00000000-0000-0000-0000-000000000001",
+    "version": "1.0.0"
+  }
+]
