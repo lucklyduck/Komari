@@ -16,11 +16,11 @@ class KomariProtocolError(KomariError):
 class KomariRpcError(KomariError):
     """Raised when an RPC method returns an error."""
 
-    def __init__(self, code: int | None, message: str) -> None:
+    def __init__(self, code: int | None, _message: str) -> None:
         """Initialize a sanitized RPC exception."""
         self.code = code
-        self.rpc_message = message
-        super().__init__(f"RPC error {code}: {message}")
+        detail = f" (code {code})" if code is not None else ""
+        super().__init__(f"Komari RPC request failed{detail}")
 
 
 class KomariMethodNotFoundError(KomariRpcError):

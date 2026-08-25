@@ -34,5 +34,13 @@
       "already_configured": "该 Komari 面板已经配置。",
       "reauth_successful": "API 密钥已更新。"
     }
+  },
+  "exceptions": {
+    "auth_failed": {
+      "message": "Komari API 密钥无效或已失去权限。"
+    },
+    "update_failed": {
+      "message": "无法从 Komari 面板更新数据。"
+    }
   }
 }

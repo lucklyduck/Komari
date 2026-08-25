@@ -260,8 +260,9 @@ async def test_rpc_error_mapping() -> None:
             ]
         )
     )
-    with pytest.raises(KomariRpcError, match="Temporary failure"):
+    with pytest.raises(KomariRpcError, match="RPC request failed") as error:
         await generic.async_ping()
+    assert "Temporary failure" not in str(error.value)
 
 
 @pytest.mark.asyncio

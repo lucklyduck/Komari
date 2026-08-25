@@ -34,5 +34,13 @@
       "already_configured": "This Komari panel is already configured.",
       "reauth_successful": "The API key was updated successfully."
     }
+  },
+  "exceptions": {
+    "auth_failed": {
+      "message": "The Komari API key is invalid or no longer has permission."
+    },
+    "update_failed": {
+      "message": "Unable to update data from the Komari panel."
+    }
   }
 }
