@@ -1,0 +1,38 @@
+{
+  "title": "Komari",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to a Komari panel",
+        "description": "Enter the panel root URL. You may also paste a URL ending in /api/rpc2.",
+        "data": {
+          "url": "Panel URL",
+          "api_key": "API key",
+          "verify_ssl": "Verify TLS certificate"
+        },
+        "data_description": {
+          "api_key": "Leave empty for a public panel."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Update Komari API key",
+        "description": "Authentication failed for {url}. Enter a new API key.",
+        "data": {
+          "api_key": "API key"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the Komari panel.",
+      "invalid_auth": "The API key is missing, invalid, or does not have permission.",
+      "invalid_response": "The panel returned an invalid RPC2 response.",
+      "invalid_url": "Enter a valid HTTP or HTTPS panel URL without user information, a query, or a fragment.",
+      "unsupported_panel": "This panel does not expose the RPC2 methods required by the integration.",
+      "unknown": "An unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "This Komari panel is already configured.",
+      "reauth_successful": "The API key was updated successfully."
+    }
+  }
+}

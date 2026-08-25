@@ -1,0 +1,38 @@
+{
+  "title": "Komari",
+  "config": {
+    "step": {
+      "user": {
+        "title": "连接 Komari 面板",
+        "description": "请输入面板根地址，也可以直接粘贴以 /api/rpc2 结尾的地址。",
+        "data": {
+          "url": "面板地址",
+          "api_key": "API 密钥",
+          "verify_ssl": "验证 TLS 证书"
+        },
+        "data_description": {
+          "api_key": "公开面板可留空。"
+        }
+      },
+      "reauth_confirm": {
+        "title": "更新 Komari API 密钥",
+        "description": "{url} 认证失败，请输入新的 API 密钥。",
+        "data": {
+          "api_key": "API 密钥"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "无法连接 Komari 面板。",
+      "invalid_auth": "API 密钥缺失、无效或权限不足。",
+      "invalid_response": "面板返回了无效的 RPC2 响应。",
+      "invalid_url": "请输入不含用户信息、查询参数和片段的有效 HTTP 或 HTTPS 面板地址。",
+      "unsupported_panel": "该面板未提供集成所需的 RPC2 方法。",
+      "unknown": "发生未知错误。"
+    },
+    "abort": {
+      "already_configured": "该 Komari 面板已经配置。",
+      "reauth_successful": "API 密钥已更新。"
+    }
+  }
+}
