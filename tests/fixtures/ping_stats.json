@@ -1,0 +1,38 @@
+{
+  "start": "2030-01-01T00:00:00Z",
+  "end": "2030-01-01T01:00:00Z",
+  "interval_seconds": 30,
+  "count": 2,
+  "stats": [
+    {
+      "entity_id": "fixture-node-sum",
+      "task_id": "101",
+      "name": "Fixture HTTP task",
+      "type": "http",
+      "interval": 30,
+      "total": 120,
+      "valid": 117,
+      "loss": 2.5,
+      "min": 10.0,
+      "max": 90.0,
+      "avg": 30.0,
+      "latest": 25.0,
+      "p50": 28.0,
+      "p99": 88.0,
+      "stddev": 7.0
+    },
+    {
+      "entity_id": "fixture-node-max",
+      "task_id": "tcp-202",
+      "total": 120,
+      "valid": 100,
+      "loss": 16.6666667,
+      "max": 120.0,
+      "avg": 45.0,
+      "latest": 40.0,
+      "p50": 42.0,
+      "p99": 118.0,
+      "stddev": 12.0
+    }
+  ]
+}

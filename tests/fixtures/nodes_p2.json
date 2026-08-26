@@ -1,0 +1,40 @@
+[
+  {
+    "uuid": "fixture-node-sum",
+    "name": "Fixture node sum",
+    "gpu_name": "unknown",
+    "expired_at": "2031-02-03T04:05:06Z",
+    "traffic_limit": 1000000,
+    "traffic_limit_type": "sum",
+    "billing_cycle": 30,
+    "auto_renewal": true
+  },
+  {
+    "uuid": "fixture-node-max",
+    "name": "Fixture node max",
+    "gpu_name": "n-a",
+    "expired_at": "2032-03-04T05:06:07+08:00",
+    "traffic_limit": 2000000,
+    "traffic_limit_type": "max",
+    "billing_cycle": 365,
+    "auto_renewal": false
+  },
+  {
+    "uuid": "fixture-node-min",
+    "name": "Fixture node min",
+    "traffic_limit": 3000000,
+    "traffic_limit_type": "min"
+  },
+  {
+    "uuid": "fixture-node-up",
+    "name": "Fixture node up",
+    "traffic_limit": 4000000,
+    "traffic_limit_type": "up"
+  },
+  {
+    "uuid": "fixture-node-down",
+    "name": "Fixture node down",
+    "traffic_limit": 5000000,
+    "traffic_limit_type": "down"
+  }
+]

@@ -1,0 +1,41 @@
+{
+  "count": 6,
+  "records": [
+    {
+      "task_id": 101,
+      "time": "2030-01-01T00:00:00Z",
+      "value": 10,
+      "client": "fixture-node-sum"
+    },
+    {
+      "task_id": 101,
+      "time": "2030-01-01T00:00:30Z",
+      "value": -1,
+      "client": "fixture-node-sum"
+    },
+    {
+      "task_id": 101,
+      "time": "2030-01-01T00:01:00Z",
+      "value": 30,
+      "client": "fixture-node-sum"
+    },
+    {
+      "task_id": "tcp-202",
+      "time": "2030-01-01T00:00:00Z",
+      "value": 20,
+      "client": "fixture-node-max"
+    },
+    {
+      "task_id": "tcp-202",
+      "time": "2030-01-01T00:00:30Z",
+      "value": 40,
+      "client": "fixture-node-max"
+    },
+    {
+      "task_id": "tcp-202",
+      "time": "2030-01-01T00:01:00Z",
+      "value": 60,
+      "client": "fixture-node-max"
+    }
+  ]
+}

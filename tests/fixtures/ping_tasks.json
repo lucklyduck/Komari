@@ -1,0 +1,18 @@
+[
+  {
+    "id": 101,
+    "name": "Fixture HTTP task",
+    "clients": ["fixture-node-sum", "hidden-fixture-node"],
+    "default_on": true,
+    "type": "http",
+    "interval": 30
+  },
+  {
+    "id": "tcp-202",
+    "name": "Fixture TCP task",
+    "clients": ["fixture-node-max"],
+    "default_on": false,
+    "type": "tcp",
+    "interval": 60
+  }
+]
