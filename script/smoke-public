@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+source "$(dirname -- "${BASH_SOURCE[0]}")/_common"
+
+if [[ $# -ne 1 ]]; then
+    echo "usage: $0 PANEL_URL" >&2
+    exit 2
+fi
+
+exec uv run python -m tests.manual.smoke_rpc --public "$1"

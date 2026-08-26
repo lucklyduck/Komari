@@ -1,0 +1,145 @@
+{
+  "title": "Komari",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to a Komari panel",
+        "description": "Enter the panel root URL. You may also paste a URL ending in /api/rpc2.",
+        "data": {
+          "url": "Panel URL",
+          "api_key": "API key",
+          "verify_ssl": "Verify TLS certificate"
+        },
+        "data_description": {
+          "api_key": "Leave empty for a public panel."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Update Komari API key",
+        "description": "Authentication failed for {url}. Enter a new API key.",
+        "data": {
+          "api_key": "API key"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the Komari panel.",
+      "invalid_auth": "The API key is missing, invalid, or does not have permission.",
+      "invalid_response": "The panel returned an invalid RPC2 response.",
+      "invalid_url": "Enter a valid HTTP or HTTPS panel URL without user information, a query, or a fragment.",
+      "unsupported_panel": "This panel does not expose the RPC2 methods required by the integration.",
+      "unknown": "An unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "This Komari panel is already configured.",
+      "reauth_successful": "The API key was updated successfully."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "rpc_available": {
+        "name": "RPC connection"
+      },
+      "node_problem": {
+        "name": "Node problem"
+      },
+      "online": {
+        "name": "Online"
+      }
+    },
+    "sensor": {
+      "node_count": {
+        "name": "Nodes"
+      },
+      "online_node_count": {
+        "name": "Online nodes"
+      },
+      "offline_node_count": {
+        "name": "Offline nodes"
+      },
+      "komari_version": {
+        "name": "Komari version"
+      },
+      "rpc_version": {
+        "name": "RPC version"
+      },
+      "build_hash": {
+        "name": "Build hash"
+      },
+      "last_seen": {
+        "name": "Last seen"
+      },
+      "cpu_usage": {
+        "name": "CPU usage"
+      },
+      "gpu_usage": {
+        "name": "GPU usage"
+      },
+      "memory_usage": {
+        "name": "Memory usage"
+      },
+      "memory_used": {
+        "name": "Memory used"
+      },
+      "memory_total": {
+        "name": "Memory total"
+      },
+      "swap_usage": {
+        "name": "Swap usage"
+      },
+      "swap_used": {
+        "name": "Swap used"
+      },
+      "disk_usage": {
+        "name": "Disk usage"
+      },
+      "disk_used": {
+        "name": "Disk used"
+      },
+      "disk_total": {
+        "name": "Disk total"
+      },
+      "load_1m": {
+        "name": "1-minute load"
+      },
+      "load_5m": {
+        "name": "5-minute load"
+      },
+      "load_15m": {
+        "name": "15-minute load"
+      },
+      "temperature": {
+        "name": "Temperature"
+      },
+      "network_in": {
+        "name": "Network receive rate"
+      },
+      "network_out": {
+        "name": "Network transmit rate"
+      },
+      "network_total_up": {
+        "name": "Total uploaded"
+      },
+      "network_total_down": {
+        "name": "Total downloaded"
+      },
+      "process_count": {
+        "name": "Processes"
+      },
+      "tcp_connections": {
+        "name": "TCP connections"
+      },
+      "udp_connections": {
+        "name": "UDP connections"
+      }
+    }
+  },
+  "exceptions": {
+    "auth_failed": {
+      "message": "The Komari API key is invalid or no longer has permission."
+    },
+    "update_failed": {
+      "message": "Unable to update data from the Komari panel."
+    }
+  }
+}

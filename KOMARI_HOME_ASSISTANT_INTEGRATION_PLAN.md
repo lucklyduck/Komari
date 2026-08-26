@@ -461,7 +461,6 @@ custom_components/komari/
 ├── manifest.json
 ├── models.py              # 规范化 dataclass，隔离 API 版本差异
 ├── sensor.py
-├── strings.json
 ├── icons.json
 └── translations/
     ├── en.json
@@ -481,6 +480,8 @@ tests/
 hacs.json
 README.md
 ```
+
+自 Home Assistant 2026.8 的官方自定义集成本地化规则起，自定义集成不使用 Core 构建流程专用的 `strings.json`；英文与中文文本应直接完整写入 `translations/en.json` 和 `translations/zh-Hans.json`。
 
 首个 HACS 版本可以暂时把 API 客户端放在 `api.py`。若以后提交 Home Assistant Core，应将通信层提取为独立、全异步、严格类型化的 PyPI 库，并允许注入 Home Assistant 的 ClientSession；这符合 Core 对依赖透明度和 Platinum 异步实现的方向。
 

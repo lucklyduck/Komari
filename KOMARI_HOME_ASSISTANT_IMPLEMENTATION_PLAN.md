@@ -78,7 +78,6 @@ custom_components/komari/
 ├── models.py
 ├── sensor.py
 ├── services.yaml                 # 只有实际增加服务后再创建
-├── strings.json
 ├── icons.json
 └── translations/
     ├── en.json
@@ -249,7 +248,6 @@ P1～P3 都属于目标功能，阶段划分只表示依赖顺序。
 - `manifest.json`
 - `__init__.py`
 - `const.py`
-- `strings.json`
 - `translations/en.json`
 - `translations/zh-Hans.json`
 - `hacs.json`
@@ -272,7 +270,7 @@ P1～P3 都属于目标功能，阶段划分只表示依赖顺序。
 }
 ```
 
-`const.py` 固定 `DOMAIN`、`PLATFORMS`、默认轮询周期、URL/API Key/TLS 配置键、Options 键、最低 Komari 版本和实体上限。所有字符串键集中定义，禁止在各平台散落字面量。
+`const.py` 固定 `DOMAIN`、`PLATFORMS`、默认轮询周期、URL/API Key/TLS 配置键、Options 键、最低 Komari 版本和实体上限。所有字符串键集中定义，禁止在各平台散落字面量。自定义集成不使用 Core 构建流程专用的 `strings.json`；英文与中文文本直接完整写入各自翻译文件。
 
 `__init__.py` 先实现 `async_setup`、`async_setup_entry`、`async_unload_entry` 的空框架；真正运行时接线在 F06 完成。
 
@@ -482,7 +480,6 @@ Ping 聚合优先 `public:getPingMetricStats`，缺失时回退到 `public:getPi
 
 - `config_flow.py`
 - `const.py`
-- `strings.json`
 - `translations/*`
 - `tests/components/komari/test_config_flow.py`
 - `tests/components/komari/test_multi_entry.py`
@@ -1458,7 +1455,6 @@ async def async_get_device_diagnostics(hass, entry, device) -> dict[str, Any]: .
 
 ### 代码落点
 
-- `strings.json`
 - `translations/en.json`
 - `translations/zh-Hans.json`
 - `icons.json`

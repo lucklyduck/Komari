@@ -1,0 +1,80 @@
+[project]
+name = "komari-home-assistant"
+version = "0.1.0-alpha.1"
+description = "A Home Assistant custom integration for Komari monitoring panels"
+requires-python = ">=3.14.2,<3.15"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pyright",
+    "pytest-homeassistant-custom-component==0.13.356",
+    "ruff",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+addopts = [
+    "-ra",
+    "--strict-config",
+    "--strict-markers",
+    "--cov=custom_components.komari",
+    "--cov-branch",
+    "--cov-report=term-missing",
+    "--cov-fail-under=90",
+]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["custom_components/komari"]
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+show_missing = true
+
+[tool.ruff]
+line-length = 88
+src = ["custom_components", "tests"]
+target-version = "py314"
+
+[tool.ruff.format]
+docstring-code-format = true
+quote-style = "double"
+
+[tool.ruff.lint]
+select = [
+    "ASYNC",
+    "B",
+    "C4",
+    "DTZ",
+    "E",
+    "F",
+    "I",
+    "LOG",
+    "PIE",
+    "PT",
+    "PYI",
+    "RSE",
+    "RUF",
+    "SIM",
+    "T20",
+    "TC",
+    "UP",
+    "W",
+]
+
+[tool.pyright]
+include = ["custom_components/komari", "tests"]
+pythonVersion = "3.14"
+typeCheckingMode = "standard"
+reportMissingTypeStubs = false
+reportIncompatibleVariableOverride = false
+reportUnknownMemberType = false
+reportUnknownVariableType = false
