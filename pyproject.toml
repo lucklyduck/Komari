@@ -75,5 +75,6 @@ include = ["custom_components/komari", "tests"]
 pythonVersion = "3.14"
 typeCheckingMode = "standard"
 reportMissingTypeStubs = false
+reportIncompatibleVariableOverride = false
 reportUnknownMemberType = false
 reportUnknownVariableType = false

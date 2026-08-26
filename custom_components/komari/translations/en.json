@@ -35,6 +35,105 @@
       "reauth_successful": "The API key was updated successfully."
     }
   },
+  "entity": {
+    "binary_sensor": {
+      "rpc_available": {
+        "name": "RPC connection"
+      },
+      "node_problem": {
+        "name": "Node problem"
+      },
+      "online": {
+        "name": "Online"
+      }
+    },
+    "sensor": {
+      "node_count": {
+        "name": "Nodes"
+      },
+      "online_node_count": {
+        "name": "Online nodes"
+      },
+      "offline_node_count": {
+        "name": "Offline nodes"
+      },
+      "komari_version": {
+        "name": "Komari version"
+      },
+      "rpc_version": {
+        "name": "RPC version"
+      },
+      "build_hash": {
+        "name": "Build hash"
+      },
+      "last_seen": {
+        "name": "Last seen"
+      },
+      "cpu_usage": {
+        "name": "CPU usage"
+      },
+      "gpu_usage": {
+        "name": "GPU usage"
+      },
+      "memory_usage": {
+        "name": "Memory usage"
+      },
+      "memory_used": {
+        "name": "Memory used"
+      },
+      "memory_total": {
+        "name": "Memory total"
+      },
+      "swap_usage": {
+        "name": "Swap usage"
+      },
+      "swap_used": {
+        "name": "Swap used"
+      },
+      "disk_usage": {
+        "name": "Disk usage"
+      },
+      "disk_used": {
+        "name": "Disk used"
+      },
+      "disk_total": {
+        "name": "Disk total"
+      },
+      "load_1m": {
+        "name": "1-minute load"
+      },
+      "load_5m": {
+        "name": "5-minute load"
+      },
+      "load_15m": {
+        "name": "15-minute load"
+      },
+      "temperature": {
+        "name": "Temperature"
+      },
+      "network_in": {
+        "name": "Network receive rate"
+      },
+      "network_out": {
+        "name": "Network transmit rate"
+      },
+      "network_total_up": {
+        "name": "Total uploaded"
+      },
+      "network_total_down": {
+        "name": "Total downloaded"
+      },
+      "process_count": {
+        "name": "Processes"
+      },
+      "tcp_connections": {
+        "name": "TCP connections"
+      },
+      "udp_connections": {
+        "name": "UDP connections"
+      }
+    }
+  },
   "exceptions": {
     "auth_failed": {
       "message": "The Komari API key is invalid or no longer has permission."

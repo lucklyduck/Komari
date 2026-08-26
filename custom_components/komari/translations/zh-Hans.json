@@ -35,6 +35,105 @@
       "reauth_successful": "API 密钥已更新。"
     }
   },
+  "entity": {
+    "binary_sensor": {
+      "rpc_available": {
+        "name": "RPC 连接"
+      },
+      "node_problem": {
+        "name": "节点故障"
+      },
+      "online": {
+        "name": "在线"
+      }
+    },
+    "sensor": {
+      "node_count": {
+        "name": "节点总数"
+      },
+      "online_node_count": {
+        "name": "在线节点数"
+      },
+      "offline_node_count": {
+        "name": "离线节点数"
+      },
+      "komari_version": {
+        "name": "Komari 版本"
+      },
+      "rpc_version": {
+        "name": "RPC 版本"
+      },
+      "build_hash": {
+        "name": "构建哈希"
+      },
+      "last_seen": {
+        "name": "最后采集"
+      },
+      "cpu_usage": {
+        "name": "CPU 使用率"
+      },
+      "gpu_usage": {
+        "name": "GPU 使用率"
+      },
+      "memory_usage": {
+        "name": "内存使用率"
+      },
+      "memory_used": {
+        "name": "已用内存"
+      },
+      "memory_total": {
+        "name": "内存总量"
+      },
+      "swap_usage": {
+        "name": "Swap 使用率"
+      },
+      "swap_used": {
+        "name": "已用 Swap"
+      },
+      "disk_usage": {
+        "name": "磁盘使用率"
+      },
+      "disk_used": {
+        "name": "已用磁盘"
+      },
+      "disk_total": {
+        "name": "磁盘总量"
+      },
+      "load_1m": {
+        "name": "1 分钟负载"
+      },
+      "load_5m": {
+        "name": "5 分钟负载"
+      },
+      "load_15m": {
+        "name": "15 分钟负载"
+      },
+      "temperature": {
+        "name": "温度"
+      },
+      "network_in": {
+        "name": "网络接收速率"
+      },
+      "network_out": {
+        "name": "网络发送速率"
+      },
+      "network_total_up": {
+        "name": "累计上传"
+      },
+      "network_total_down": {
+        "name": "累计下载"
+      },
+      "process_count": {
+        "name": "进程数"
+      },
+      "tcp_connections": {
+        "name": "TCP 连接数"
+      },
+      "udp_connections": {
+        "name": "UDP 连接数"
+      }
+    }
+  },
   "exceptions": {
     "auth_failed": {
       "message": "Komari API 密钥无效或已失去权限。"
