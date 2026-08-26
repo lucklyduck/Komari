@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+source "$(dirname -- "${BASH_SOURCE[0]}")/_common"
+
+exec uv run python tests/manual/fake_komari.py "$@"
