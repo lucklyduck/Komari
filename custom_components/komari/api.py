@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Mapping
 from itertools import count
 from json import JSONDecodeError
+from types import MappingProxyType
 from typing import Any
 
 from aiohttp import ClientError, ClientSession, ClientTimeout
@@ -16,11 +17,13 @@ from .const import (
     DEFAULT_REQUEST_TIMEOUT,
     METHOD_COMMON_NODES,
     METHOD_COMMON_PUBLIC_INFO,
+    METHOD_COMMON_RECORDS,
     METHOD_COMMON_VERSION,
     METHOD_LATEST_STATUS,
     METHOD_PING,
     METHOD_PING_METRIC_STATS,
     METHOD_PUBLIC_NODES,
+    METHOD_PUBLIC_PING_RECORDS,
     METHOD_PUBLIC_PING_TASKS,
     METHOD_PUBLIC_SETTINGS,
     METHOD_PUBLIC_VERSION,
@@ -48,12 +51,32 @@ from .models import (
     parse_nodes,
     parse_panel_info,
     parse_ping_metric_stats,
+    parse_ping_records_stats,
     parse_ping_tasks,
     parse_statuses,
 )
 
 RPC_METHOD_NOT_FOUND = -32601
 _AUTH_ERROR_WORDS = ("auth", "credential", "forbidden", "permission", "unauthorized")
+
+
+def select_ping_stats_method(
+    capabilities: frozenset[str],
+    node_uuids: tuple[str, ...],
+    task_ids: tuple[str, ...],
+) -> str:
+    """Select one capability that can cover the whole requested Ping batch."""
+    if METHOD_PING_METRIC_STATS in capabilities:
+        return METHOD_PING_METRIC_STATS
+    if METHOD_PUBLIC_PING_RECORDS in capabilities and (
+        len(node_uuids) == 1 or len(task_ids) == 1
+    ):
+        return METHOD_PUBLIC_PING_RECORDS
+    if METHOD_COMMON_RECORDS in capabilities:
+        return METHOD_COMMON_RECORDS
+    raise KomariUnsupportedError(
+        "Komari does not expose a one-request Ping statistics method"
+    )
 
 
 class KomariApiClient:
@@ -237,18 +260,50 @@ class KomariApiClient:
         max_points: int,
     ) -> Mapping[KomariPingSeriesKey, KomariPingStats]:
         """Return one batch of Ping statistics for visible nodes and tasks."""
-        if METHOD_PING_METRIC_STATS not in capabilities:
-            raise KomariUnsupportedError("Komari does not expose Ping statistics")
-        return parse_ping_metric_stats(
-            await self.async_call(
-                METHOD_PING_METRIC_STATS,
-                {
-                    "entity_ids": list(node_uuids),
-                    "task_ids": list(task_ids),
-                    "hours": hours,
-                    "max_points": max_points,
-                },
+        method = select_ping_stats_method(capabilities, node_uuids, task_ids)
+        if not node_uuids or not task_ids:
+            return MappingProxyType({})
+
+        if method == METHOD_PING_METRIC_STATS:
+            stats = parse_ping_metric_stats(
+                await self.async_call(
+                    method,
+                    {
+                        "entity_ids": list(node_uuids),
+                        "task_ids": list(task_ids),
+                        "hours": hours,
+                        "max_points": max_points,
+                    },
+                )
             )
+        else:
+            if method == METHOD_PUBLIC_PING_RECORDS:
+                params: dict[str, object] = {"hours": str(hours)}
+                if len(task_ids) == 1:
+                    params["task_id"] = task_ids[0]
+                else:
+                    params["uuid"] = node_uuids[0]
+            else:
+                params = {
+                    "type": "ping",
+                    "hours": hours,
+                    "maxCount": max_points,
+                }
+            stats = parse_ping_records_stats(
+                await self.async_call(method, params),
+                node_uuids=node_uuids,
+                task_ids=task_ids,
+                max_points=max_points,
+            )
+
+        visible_nodes = frozenset(node_uuids)
+        selected_tasks = frozenset(task_ids)
+        return MappingProxyType(
+            {
+                key: value
+                for key, value in stats.items()
+                if key.node_uuid in visible_nodes and key.task_id in selected_tasks
+            }
         )
 
     async def async_get_metadata(self) -> tuple[KomariPanelInfo, frozenset[str]]:

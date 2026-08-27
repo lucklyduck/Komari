@@ -20,10 +20,12 @@ from custom_components.komari.api import KomariApiClient
 from custom_components.komari.const import (
     METHOD_COMMON_NODES,
     METHOD_COMMON_PUBLIC_INFO,
+    METHOD_COMMON_RECORDS,
     METHOD_COMMON_VERSION,
     METHOD_LATEST_STATUS,
     METHOD_PING_METRIC_STATS,
     METHOD_PUBLIC_NODES,
+    METHOD_PUBLIC_PING_RECORDS,
     METHOD_PUBLIC_PING_TASKS,
     METHOD_PUBLIC_SETTINGS,
     METHOD_PUBLIC_VERSION,
@@ -42,6 +44,7 @@ from custom_components.komari.models import (
     parse_datetime,
     parse_nodes,
     parse_ping_metric_stats,
+    parse_ping_records_stats,
     parse_ping_tasks,
     parse_statuses,
 )
@@ -495,6 +498,145 @@ def test_ping_task_and_stats_fixtures_are_normalized() -> None:
     assert second.total == 120
 
 
+def test_ping_records_fallback_uses_locked_statistics_algorithms() -> None:
+    """Records fallback computes loss, nearest-rank percentiles, and population SD."""
+    stats = parse_ping_records_stats(
+        load_fixture("ping_records.json"),
+        node_uuids=("fixture-node-sum", "fixture-node-max"),
+        task_ids=("101", "tcp-202"),
+        max_points=120,
+    )
+
+    first = stats[next(key for key in stats if key.task_id == "101")]
+    second = stats[next(key for key in stats if key.task_id == "tcp-202")]
+    assert first.latest == 30
+    assert first.loss == pytest.approx(100 / 3)
+    assert first.minimum == 10
+    assert first.maximum == 30
+    assert first.average == 20
+    assert first.p50 == 10
+    assert first.p99 == 30
+    assert first.stddev == 10
+    assert first.total == 3
+    assert first.valid == 2
+    assert second.latest == 60
+    assert second.loss == 0
+    assert second.p50 == 40
+    assert second.p99 == 60
+    assert second.stddev == pytest.approx(16.3299316)
+
+
+def test_ping_records_fallback_filters_and_caps_each_series() -> None:
+    """Only selected visible series survive and each retains its latest point window."""
+    payload = load_fixture("ping_records.json")
+    assert isinstance(payload, dict)
+    payload["records"].append(
+        {
+            "task_id": 101,
+            "time": "2030-01-01T00:02:00Z",
+            "value": -1,
+            "client": "fixture-node-sum",
+        }
+    )
+    payload["records"].append(
+        {
+            "task_id": 101,
+            "time": "2030-01-01T00:03:00Z",
+            "value": 999,
+            "client": "hidden-fixture-node",
+        }
+    )
+
+    stats = parse_ping_records_stats(
+        payload,
+        node_uuids=("fixture-node-sum",),
+        task_ids=("101",),
+        max_points=2,
+    )
+
+    assert len(stats) == 1
+    result = next(iter(stats.values()))
+    assert result.total == 2
+    assert result.valid == 1
+    assert result.latest == 30
+    assert result.loss == 50
+
+
+def test_ping_records_with_only_failures_keep_loss_but_no_latency() -> None:
+    """A real series with no valid samples retains loss and sample counts."""
+    stats = parse_ping_records_stats(
+        {
+            "records": [
+                {
+                    "task_id": 1,
+                    "time": "2030-01-01T00:00:00Z",
+                    "value": -1,
+                    "client": "visible-node",
+                },
+                {
+                    "task_id": 1,
+                    "time": "2030-01-01T00:01:00Z",
+                    "value": -2,
+                    "client": "visible-node",
+                },
+            ]
+        },
+        node_uuids=("visible-node",),
+        task_ids=("1",),
+        max_points=120,
+    )
+    result = next(iter(stats.values()))
+
+    assert result.loss == 100
+    assert result.total == 2
+    assert result.valid == 0
+    assert result.latest is None
+    assert result.minimum is None
+    assert result.p50 is None
+    assert result.stddev is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        {},
+        {"records": ["bad"]},
+        {"records": [{"client": "node", "task_id": 1, "value": 10}]},
+        {
+            "records": [
+                {
+                    "client": "node",
+                    "task_id": 1,
+                    "value": float("nan"),
+                    "time": "2030-01-01T00:00:00Z",
+                }
+            ]
+        },
+    ],
+)
+def test_invalid_ping_record_shapes_fail_explicitly(payload: object) -> None:
+    """Malformed fallback records never silently create partial series."""
+    with pytest.raises(KomariProtocolError):
+        parse_ping_records_stats(
+            payload,
+            node_uuids=("node",),
+            task_ids=("1",),
+            max_points=120,
+        )
+
+
+def test_ping_records_reject_non_positive_point_limit() -> None:
+    """The records adapter enforces the fixed positive point budget."""
+    with pytest.raises(KomariProtocolError, match="max_points"):
+        parse_ping_records_stats(
+            {"records": []},
+            node_uuids=("node",),
+            task_ids=("1",),
+            max_points=0,
+        )
+
+
 @pytest.mark.parametrize(
     "payload",
     [None, {}, ["task"], [{"name": "missing id"}], [{"id": True}]],
@@ -553,6 +695,107 @@ async def test_client_fetches_ping_tasks_and_one_batch_of_stats() -> None:
         "hours": 1,
         "max_points": 120,
     }
+
+
+async def test_client_filters_unrequested_direct_ping_series() -> None:
+    """Unexpected hidden or unselected direct results never enter the snapshot."""
+    session = FakeSession(
+        [],
+        rpc_results={METHOD_PING_METRIC_STATS: load_fixture("ping_stats.json")},
+    )
+    stats = await make_client(session).async_get_ping_stats(
+        frozenset({METHOD_PING_METRIC_STATS}),
+        ("fixture-node-sum",),
+        ("101",),
+        hours=1,
+        max_points=120,
+    )
+
+    assert len(stats) == 1
+    assert next(iter(stats)).node_uuid == "fixture-node-sum"
+    assert next(iter(stats)).task_id == "101"
+
+
+async def test_client_uses_one_public_records_request_for_one_task() -> None:
+    """One selected task uses one task-centric public records request."""
+    session = FakeSession(
+        [],
+        rpc_results={METHOD_PUBLIC_PING_RECORDS: load_fixture("ping_records.json")},
+    )
+    stats = await make_client(session).async_get_ping_stats(
+        frozenset({METHOD_PUBLIC_PING_RECORDS}),
+        ("fixture-node-sum", "fixture-node-max"),
+        ("101",),
+        hours=1,
+        max_points=120,
+    )
+
+    assert len(stats) == 1
+    assert len(session.requests) == 1
+    assert session.requests[0]["json"]["params"] == {
+        "hours": "1",
+        "task_id": "101",
+    }
+
+
+async def test_client_uses_one_public_records_request_for_one_node() -> None:
+    """One visible node uses one node-centric request for multiple tasks."""
+    session = FakeSession(
+        [],
+        rpc_results={METHOD_PUBLIC_PING_RECORDS: load_fixture("ping_records.json")},
+    )
+    stats = await make_client(session).async_get_ping_stats(
+        frozenset({METHOD_PUBLIC_PING_RECORDS}),
+        ("fixture-node-max",),
+        ("101", "tcp-202"),
+        hours=1,
+        max_points=120,
+    )
+
+    assert len(stats) == 1
+    assert session.requests[0]["json"]["params"] == {
+        "hours": "1",
+        "uuid": "fixture-node-max",
+    }
+
+
+async def test_client_uses_one_common_records_request_for_full_matrix() -> None:
+    """A multi-node/task fallback remains one global capability-confirmed call."""
+    session = FakeSession(
+        [],
+        rpc_results={METHOD_COMMON_RECORDS: load_fixture("ping_records.json")},
+    )
+    stats = await make_client(session).async_get_ping_stats(
+        frozenset({METHOD_PUBLIC_PING_RECORDS, METHOD_COMMON_RECORDS}),
+        ("fixture-node-sum", "fixture-node-max"),
+        ("101", "tcp-202"),
+        hours=1,
+        max_points=120,
+    )
+
+    assert len(stats) == 2
+    assert len(session.requests) == 1
+    assert session.requests[0]["json"]["method"] == METHOD_COMMON_RECORDS
+    assert session.requests[0]["json"]["params"] == {
+        "type": "ping",
+        "hours": 1,
+        "maxCount": 120,
+    }
+
+
+async def test_public_records_never_fans_out_for_full_matrix() -> None:
+    """Public records alone is rejected when it would require N-by-M requests."""
+    session = FakeSession([])
+    with pytest.raises(KomariUnsupportedError, match="one-request"):
+        await make_client(session).async_get_ping_stats(
+            frozenset({METHOD_PUBLIC_PING_RECORDS}),
+            ("node-1", "node-2"),
+            ("1", "2"),
+            hours=1,
+            max_points=120,
+        )
+
+    assert session.requests == []
 
 
 async def test_ping_methods_require_advertised_capabilities() -> None:

@@ -6,7 +6,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from math import isfinite
+from math import ceil, isfinite
+from statistics import fmean, pstdev
 from types import MappingProxyType
 from typing import Any
 
@@ -278,6 +279,74 @@ def parse_ping_metric_stats(
             valid=_optional_non_negative_int(raw_stats.get("valid")),
         )
     return MappingProxyType(result)
+
+
+def parse_ping_records_stats(
+    payload: object,
+    *,
+    node_uuids: tuple[str, ...],
+    task_ids: tuple[str, ...],
+    max_points: int,
+) -> Mapping[KomariPingSeriesKey, KomariPingStats]:
+    """Calculate typed Ping statistics from one batched records response."""
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("records"), list):
+        raise KomariProtocolError("Ping records response must contain an array")
+    if max_points <= 0:
+        raise KomariProtocolError("Ping records max_points must be positive")
+
+    visible_nodes = frozenset(node_uuids)
+    selected_tasks = frozenset(task_ids)
+    grouped: dict[KomariPingSeriesKey, list[tuple[datetime, float]]] = {}
+    for raw_record in payload["records"]:
+        if not isinstance(raw_record, Mapping):
+            raise KomariProtocolError("Each Ping record must be an object")
+        node_uuid = _optional_str(raw_record.get("client")) or _optional_str(
+            raw_record.get("entity_id")
+        )
+        task_id = _identifier(raw_record.get("task_id"))
+        observed_at = parse_datetime(raw_record.get("time"))
+        value = _optional_finite_float(raw_record.get("value"))
+        if node_uuid is None or task_id is None or observed_at is None or value is None:
+            raise KomariProtocolError("Ping record is missing required fields")
+        if node_uuid not in visible_nodes or task_id not in selected_tasks:
+            continue
+        key = KomariPingSeriesKey(node_uuid=node_uuid, task_id=task_id)
+        grouped.setdefault(key, []).append((observed_at, value))
+
+    result: dict[KomariPingSeriesKey, KomariPingStats] = {}
+    for key, records in grouped.items():
+        records.sort(key=lambda item: item[0])
+        records = records[-max_points:]
+        valid_values = [value for _, value in records if value >= 0]
+        total = len(records)
+        valid = len(valid_values)
+        latest = next(
+            (value for _, value in reversed(records) if value >= 0),
+            None,
+        )
+        average = fmean(valid_values) if valid_values else None
+        result[key] = KomariPingStats(
+            latest=latest,
+            loss=(total - valid) / total * 100,
+            minimum=min(valid_values) if valid_values else None,
+            maximum=max(valid_values) if valid_values else None,
+            average=average,
+            p50=_nearest_rank(valid_values, 0.50),
+            p99=_nearest_rank(valid_values, 0.99),
+            stddev=pstdev(valid_values) if valid_values else None,
+            total=total,
+            valid=valid,
+        )
+    return MappingProxyType(result)
+
+
+def _nearest_rank(values: list[float], percentile: float) -> float | None:
+    """Return a deterministic nearest-rank percentile for valid samples."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    rank = max(1, ceil(percentile * len(ordered)))
+    return ordered[min(rank, len(ordered)) - 1]
 
 
 def _parse_node(node_uuid: str, raw: Mapping[str, Any]) -> KomariNode:
