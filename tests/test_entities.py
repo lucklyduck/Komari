@@ -9,7 +9,10 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from custom_components.komari import async_remove_config_entry_device
+from custom_components.komari import (
+    async_remove_config_entry_device,
+    async_remove_entry,
+)
 from custom_components.komari.binary_sensor import (
     EXPIRY_BINARY_SENSOR_DESCRIPTIONS,
 )
@@ -26,6 +29,7 @@ from custom_components.komari.const import (
 )
 from custom_components.komari.coordinator import (
     BRANCH_PING_STATS,
+    BRANCH_PING_TASKS,
     KomariBranchState,
     KomariSnapshot,
 )
@@ -45,6 +49,13 @@ from custom_components.komari.models import (
     parse_ping_metric_stats,
     parse_ping_tasks,
     parse_statuses,
+)
+from custom_components.komari.repairs import (
+    ISSUE_PING_ENTITY_LIMIT_EXCEEDED,
+    ISSUE_SELECTED_PING_TASK_MISSING,
+    ISSUE_TLS_VERIFICATION_DISABLED,
+    issue_id,
+    update_repairs,
 )
 from custom_components.komari.sensor import (
     EXPIRY_SENSOR_DESCRIPTIONS,
@@ -74,6 +85,7 @@ from homeassistant.const import (
 )
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -2023,6 +2035,171 @@ def test_nested_diagnostics_defense_redacts_sensitive_keys() -> None:
     assert "nested-secret" not in serialized
     assert NODE_UUID not in serialized
     assert "203.0.113.9" not in serialized
+
+
+async def test_tls_repair_is_entry_scoped_and_clears_with_configuration(
+    hass: HomeAssistant,
+) -> None:
+    """Only HTTPS entries with verification disabled retain the warning."""
+    entry_a = await _setup_entry(
+        hass,
+        _bootstrap(panel_name="Panel A"),
+        title="Panel A",
+        url="https://tls-a.example.test",
+    )
+    entry_b = await _setup_entry(
+        hass,
+        _bootstrap(panel_name="Panel B"),
+        title="Panel B",
+        url="https://tls-b.example.test",
+    )
+    registry = ir.async_get(hass)
+    for entry in (entry_a, entry_b):
+        hass.config_entries.async_update_entry(
+            entry,
+            data={**entry.data, CONF_VERIFY_SSL: False},
+        )
+        update_repairs(hass, entry)
+
+    issue_a = issue_id(entry_a.entry_id, ISSUE_TLS_VERIFICATION_DISABLED)
+    issue_b = issue_id(entry_b.entry_id, ISSUE_TLS_VERIFICATION_DISABLED)
+    assert issue_a != issue_b
+    assert registry.async_get_issue(DOMAIN, issue_a) is not None
+    assert registry.async_get_issue(DOMAIN, issue_b) is not None
+
+    hass.config_entries.async_update_entry(
+        entry_a,
+        data={**entry_a.data, CONF_VERIFY_SSL: True},
+    )
+    update_repairs(hass, entry_a)
+    assert registry.async_get_issue(DOMAIN, issue_a) is None
+    assert registry.async_get_issue(DOMAIN, issue_b) is not None
+
+    hass.config_entries.async_update_entry(
+        entry_b,
+        data={**entry_b.data, CONF_URL: "http://tls-b.example.test"},
+    )
+    update_repairs(hass, entry_b)
+    assert registry.async_get_issue(DOMAIN, issue_b) is None
+
+
+async def test_missing_ping_task_repair_waits_for_authoritative_state(
+    hass: HomeAssistant,
+) -> None:
+    """A successful missing list creates the issue and recovery clears it."""
+    tasks = parse_ping_tasks([{"id": 101, "name": "Task one"}])
+    entry = await _setup_ping_entry(
+        hass,
+        task_payloads=[{"id": 101, "name": "Task one"}],
+        stats_payloads=[
+            {"entity_id": NODE_UUID, "task_id": 101, "latest": 10, "loss": 0}
+        ],
+        selected_task_ids=["101"],
+        selected_stats=["latest"],
+    )
+    registry = ir.async_get(hass)
+    repair_id = issue_id(entry.entry_id, ISSUE_SELECTED_PING_TASK_MISSING)
+    coordinator = entry.runtime_data.coordinator
+    assert registry.async_get_issue(DOMAIN, repair_id) is None
+
+    coordinator._branch_states[BRANCH_PING_TASKS] = KomariBranchState(
+        fetched_at=datetime.now(tz=UTC)
+    )
+    coordinator.async_set_updated_data(
+        replace(coordinator.data, ping_tasks=parse_ping_tasks([]))
+    )
+    update_repairs(hass, entry)
+    issue = registry.async_get_issue(DOMAIN, repair_id)
+    assert issue is not None
+    assert issue.translation_key == ISSUE_SELECTED_PING_TASK_MISSING
+    assert issue.translation_placeholders is not None
+    assert issue.translation_placeholders["missing_count"] == "1"
+
+    coordinator._branch_states[BRANCH_PING_TASKS] = KomariBranchState(
+        fetched_at=datetime.now(tz=UTC),
+        error_category="connection",
+        consecutive_failures=1,
+    )
+    update_repairs(hass, entry)
+    assert registry.async_get_issue(DOMAIN, repair_id) is not None
+
+    coordinator._branch_states[BRANCH_PING_TASKS] = KomariBranchState(
+        fetched_at=datetime.now(tz=UTC)
+    )
+    coordinator.async_set_updated_data(replace(coordinator.data, ping_tasks=tasks))
+    update_repairs(hass, entry)
+    assert registry.async_get_issue(DOMAIN, repair_id) is None
+
+
+async def test_ping_limit_repair_uses_actual_series_and_auto_clears(
+    hass: HomeAssistant,
+) -> None:
+    """Post-save inventory growth creates and later clears the 256 limit issue."""
+    node_payloads = [
+        _node_payload(f"limit-node-{index}", name=f"Node {index}")
+        for index in range(1, 6)
+    ]
+    status_payloads = [_status_payload(f"limit-node-{index}") for index in range(1, 6)]
+    task_payloads = [{"id": index, "name": f"Task {index}"} for index in range(1, 9)]
+    stats_payloads = [
+        {
+            "entity_id": f"limit-node-{node_index}",
+            "task_id": task_index,
+            "latest": 1,
+            "loss": 0,
+        }
+        for node_index in range(1, 6)
+        for task_index in range(1, 9)
+    ]
+    entry = await _setup_ping_entry(
+        hass,
+        task_payloads=task_payloads,
+        stats_payloads=stats_payloads,
+        selected_task_ids=[str(index) for index in range(1, 9)],
+        selected_stats=[description.key for description in PING_SENSOR_DESCRIPTIONS],
+        node_payloads=node_payloads,
+        status_payloads=status_payloads,
+    )
+    registry = ir.async_get(hass)
+    repair_id = issue_id(entry.entry_id, ISSUE_PING_ENTITY_LIMIT_EXCEEDED)
+    issue = registry.async_get_issue(DOMAIN, repair_id)
+    assert issue is not None
+    assert issue.translation_placeholders is not None
+    assert issue.translation_placeholders["entity_count"] == "320"
+    assert issue.translation_placeholders["entity_limit"] == "256"
+
+    hass.config_entries.async_update_entry(
+        entry,
+        options={
+            **entry.options,
+            CONF_PING_STAT_KEYS: ["latest"],
+        },
+    )
+    update_repairs(hass, entry)
+    assert registry.async_get_issue(DOMAIN, repair_id) is None
+
+
+async def test_config_entry_removal_clears_all_repairs(
+    hass: HomeAssistant,
+) -> None:
+    """Deleting a panel does not leave orphaned Repair issues."""
+    entry = await _setup_entry(
+        hass,
+        _bootstrap(),
+        url="https://remove-repair.example.test",
+    )
+    hass.config_entries.async_update_entry(
+        entry,
+        data={**entry.data, CONF_VERIFY_SSL: False},
+    )
+    update_repairs(hass, entry)
+    repair_id = issue_id(entry.entry_id, ISSUE_TLS_VERIFICATION_DISABLED)
+    registry = ir.async_get(hass)
+    assert registry.async_get_issue(DOMAIN, repair_id) is not None
+
+    await async_remove_entry(hass, entry)
+
+    assert registry.async_get_issue(DOMAIN, repair_id) is None
 
 
 def test_description_defaults_match_the_p1_contract() -> None:

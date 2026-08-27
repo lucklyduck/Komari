@@ -273,5 +273,19 @@
     "update_failed": {
       "message": "Unable to update data from the Komari panel."
     }
+  },
+  "issues": {
+    "selected_ping_task_missing": {
+      "title": "A selected Komari Ping task is missing",
+      "description": "The Komari panel **{entry_title}** no longer lists {missing_count} selected Ping task(s). Open the integration options and remove the missing selection, or restore the task on the panel."
+    },
+    "ping_entity_limit_exceeded": {
+      "title": "Komari Ping entity limit exceeded",
+      "description": "The current results for **{entry_title}** would create {entity_count} Ping entities, above the per-panel limit of {entity_limit}. Reduce the selected tasks or statistics in the integration options. Excess entities are not created."
+    },
+    "tls_verification_disabled": {
+      "title": "TLS certificate verification is disabled for Komari",
+      "description": "The HTTPS connection for **{entry_title}** does not verify the server certificate. Reconfigure the integration and enable TLS verification unless this is an intentional, temporary test setup."
+    }
   }
 }

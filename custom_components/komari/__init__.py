@@ -24,6 +24,7 @@ from .lifecycle import (
     remove_node_registry_entries,
 )
 from .options import get_options
+from .repairs import clear_repairs, update_repairs
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -102,6 +103,7 @@ async def async_setup_entry(
         coordinator=coordinator,
         panel_device_id=panel.id,
     )
+    update_repairs(hass, entry)
 
     def _sync_devices() -> None:
         register_devices(hass, entry, coordinator.data)
@@ -119,6 +121,7 @@ async def async_setup_entry(
             allowed_stat_keys=options.ping_stat_keys,
             confirmed_removed_task_ids=(coordinator.confirmed_removed_ping_task_ids),
         )
+        update_repairs(hass, entry)
 
     entry.async_on_unload(coordinator.async_add_listener(_sync_devices))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -147,3 +150,11 @@ async def async_remove_config_entry_device(
     ) is None:
         return False
     return node_uuid not in config_entry.runtime_data.coordinator.last_observed_node_ids
+
+
+async def async_remove_entry(
+    hass: HomeAssistant,
+    entry: KomariConfigEntry,
+) -> None:
+    """Clear Repair issues after a Komari config entry is deleted."""
+    clear_repairs(hass, entry.entry_id)

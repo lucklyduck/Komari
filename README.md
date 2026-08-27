@@ -1,21 +1,31 @@
 # Komari for Home Assistant
 
-Komari 的 Home Assistant 自定义集成。当前版本为 `0.1.0-alpha.1`，实现了
-P1 多面板监控 MVP。
+Komari 的 Home Assistant 自定义集成。当前开发分支目标版本为
+`0.2.0-alpha.1`，在 P1 多面板监控 MVP 上增加了可配置调度、到期与流量限额、
+Ping 统计、生命周期清理、Diagnostics 和 Repairs。
 
 每次“添加集成”对应一个独立 Komari 面板（一个 Config Entry）。每个面板在
 Home Assistant 中创建一个服务设备，面板下的每个 Komari 节点创建一个子设备。
 因此可以重复添加多个面板；即使不同面板使用相同节点 UUID，设备和实体也不会
 互相合并。
 
-## P1 已实现范围
+## 已实现范围
 
 - 通过 `{panel_url}/api/rpc2` 使用异步 JSON-RPC 2.0 通信。
 - 支持匿名面板和可选 API Key；API Key 以 Bearer Token 发送。
 - 支持 TLS 证书验证开关、URL 规范化、重复面板阻止和 API Key 重认证。
 - 每个面板拥有独立 API Client、Coordinator、故障状态和数据快照。
-- 最新状态每 30 秒刷新，节点清单每 10 分钟刷新。
-- 节点动态新增；清单刷新失败时保留上次成功的节点集合。
+- 核心状态、节点清单、Ping 任务、Ping 统计和能力探测分别调度；核心与 Ping 周期
+  可按面板配置。
+- 节点动态新增；清单刷新失败时保留上次成功的节点集合，连续三次权威清单缺失
+  后才清理陈旧节点设备和实体。
+- 提供完整 Options Flow 和 URL/TLS Reconfigure；API Key 失效时自动发起 Reauth。
+- 到期、续费、计费周期、五种流量限额口径和重置敏感的 Agent 流量计数。
+- 发现并选择 Ping 任务，按节点提供最新延迟、丢包率以及可选的
+  min/max/avg/P50/P99/stddev；每个面板最多 256 个 Ping 实体。
+- 提供不含 URL、Key、IP、UUID、名称、任务目标和真实指标值的 Diagnostics。
+- 为已选 Ping 任务缺失、Ping 实体超限和 HTTPS 关闭 TLS 验证创建可自动清除的
+  Repairs。
 - 中英文配置流程和实体翻译。
 
 面板设备提供：
@@ -30,6 +40,8 @@ Home Assistant 中创建一个服务设备，面板下的每个 Komari 节点创
 - CPU、GPU、内存、Swap、磁盘、1/5/15 分钟负载和温度。
 - 网络上下行速率、Agent 启动后累计上传/下载流量。
 - 进程数、TCP 连接数和 UDP 连接数。
+- 可选的到期、续费、计费周期和流量限额实体。
+- 用户选择的 Ping 任务及统计实体；任务名称只用于显示，任务 ID 才参与实体标识。
 
 面板 RPC 断开时，面板连接状态显示为 `off`。节点明确报告离线时，节点连接
 状态显示为 `off`、动态数值实体不可用、最后采集时间保留；没有取得节点状态时，
@@ -50,6 +62,26 @@ Home Assistant 中创建一个服务设备，面板下的每个 Komari 节点创
 - 是否验证 TLS 证书；生产环境应保持启用。
 
 同一面板只能添加一次。若要监控多个面板，请分别重复“添加集成”。
+
+## 每面板选项
+
+在集成页面打开“配置”可分别设置：
+
+- 核心状态周期：15～300 秒，默认 30 秒。
+- Ping 统计周期：60～1800 秒，默认 300 秒。
+- 是否启用到期/续费和流量限额实体。
+- 最多 8 个 Ping 任务，以及需要创建的统计项。默认统计项为最新延迟和丢包率。
+
+保存选项只重载当前面板。若所选组合超过 256 个 Ping 实体，表单会阻止保存；
+如果后续节点增长导致实际组合超过上限，超出部分不会创建，并会出现 Repair。
+
+“重新配置”可以修改 URL 和 TLS 验证，不会显示或修改 API Key。实际更换 URL 前
+需要二次确认，现有 Config Entry、设备和实体标识保持不变。API Key 只能通过
+自动发起的 Reauth 更新。
+
+累计上传/下载以及按限额口径折算的流量来自 Komari Agent 计数器。Agent 重启可
+能令计数归零，因此集成不会把它当作权威账期用量，也不会在 Home Assistant 本地
+拼接账期流量。
 
 ## WSL2 开发环境
 
@@ -113,19 +145,15 @@ bash script/smoke-public https://monitor.example.com
 该命令只执行 RPC2 bootstrap 验证，不打印或持久化面板名称、节点 UUID、地址或
 指标值。
 
-## P1 已知限制
+## 当前边界
 
-下列功能已经纳入总体设计，但不属于本次 P1 实现：
+动态/自定义指标发现与映射（F16）、HACS 元数据、远程仓库、许可证和 HA Core
+提交不属于当前阶段。WebSocket、JSON-RPC batch、历史数据全量导入和在 HA 本地
+重建账期流量也不在当前范围内。
 
-- 到期时间、自动续费和流量限额/账期用量。
-- Ping 任务发现、选择、延迟和丢包统计。
-- 动态/自定义指标发现、筛选和实体映射。
-- 完整 Options Flow、URL/TLS Reconfigure（P1 仅包含 API Key Reauth）。
-- 远端删除节点后的陈旧实体/设备清理。
-- Diagnostics、Repairs、HACS 元数据和发布流程。
-
-网络累计流量是 Komari Agent 启动后的计数器，不应视作权威账期用量。WebSocket、
-JSON-RPC batch 和历史数据全量导入也不在 P1 范围内。
+当前为 alpha 开发版本。公开面板只应用于匿名只读兼容性验证；不要在日志、测试
+fixture 或报告中保存面板名称、节点 UUID、地址、任务目标和指标值。生产环境的
+HTTPS 面板应保持 TLS 证书验证启用。
 
 ## 设计文档
 
