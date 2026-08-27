@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from custom_components.komari import async_remove_config_entry_device
 from custom_components.komari.binary_sensor import (
     EXPIRY_BINARY_SENSOR_DESCRIPTIONS,
 )
@@ -1649,6 +1650,246 @@ async def test_two_panels_keep_same_ping_identity_inputs_separate(
     assert entity_a != entity_b
     assert float(_state(hass, entity_a).state) == 10
     assert float(_state(hass, entity_b).state) == 20
+
+
+async def test_confirmed_node_removal_cleans_device_and_all_node_entities(
+    hass: HomeAssistant,
+) -> None:
+    """The third successful omission removes only the missing node subtree."""
+    bootstrap = _bootstrap(
+        node_payloads=[
+            _node_payload(NODE_UUID),
+            _node_payload(SECOND_NODE_UUID, name="Second node"),
+        ],
+        status_payloads=[
+            _status_payload(NODE_UUID),
+            _status_payload(SECOND_NODE_UUID),
+        ],
+    )
+    entry = await _setup_entry(hass, bootstrap)
+    device_registry = dr.async_get(hass)
+    entity_registry = er.async_get(hass)
+    second_device = get_node_device(
+        device_registry,
+        entry.entry_id,
+        SECOND_NODE_UUID,
+    )
+    assert second_device is not None
+    second_cpu_id = _entity_id(
+        hass,
+        "sensor",
+        _unique_id(
+            entry.entry_id,
+            f"node:{SECOND_NODE_UUID}",
+            "cpu_usage",
+        ),
+    )
+    remaining_nodes = parse_nodes([_node_payload(NODE_UUID)])
+    remaining_statuses = parse_statuses([_status_payload(NODE_UUID)])
+    coordinator = entry.runtime_data.coordinator
+
+    with (
+        patch.object(
+            coordinator.client,
+            "async_get_nodes",
+            new=AsyncMock(return_value=remaining_nodes),
+        ),
+        patch.object(
+            coordinator.client,
+            "async_get_latest_status",
+            new=AsyncMock(return_value=remaining_statuses),
+        ),
+    ):
+        for miss in range(1, 4):
+            coordinator._last_inventory_attempt = -1_000_000
+            coordinator.async_set_updated_data(await coordinator._async_update_data())
+            await hass.async_block_till_done()
+            if miss < 3:
+                assert (
+                    get_node_device(
+                        device_registry,
+                        entry.entry_id,
+                        SECOND_NODE_UUID,
+                    )
+                    is not None
+                )
+
+    assert get_node_device(device_registry, entry.entry_id, SECOND_NODE_UUID) is None
+    assert get_node_device(device_registry, entry.entry_id, NODE_UUID) is not None
+    assert get_panel_device(device_registry, entry.entry_id) is not None
+    second_prefix = f"{entry.entry_id}:node:{SECOND_NODE_UUID}:"
+    assert not any(
+        item.unique_id.startswith(second_prefix)
+        for item in er.async_entries_for_config_entry(entity_registry, entry.entry_id)
+    )
+    assert hass.states.get(second_cpu_id) is None
+
+
+async def test_confirmed_ping_task_removal_cleans_only_that_task(
+    hass: HomeAssistant,
+) -> None:
+    """Three task-list omissions remove its entities without touching core data."""
+    entry = await _setup_ping_entry(
+        hass,
+        task_payloads=[
+            {"id": 101, "name": "Task one"},
+            {"id": 202, "name": "Task two"},
+        ],
+        stats_payloads=[
+            {"entity_id": NODE_UUID, "task_id": 101, "latest": 10, "loss": 0},
+            {"entity_id": NODE_UUID, "task_id": 202, "latest": 20, "loss": 5},
+        ],
+        selected_task_ids=["101", "202"],
+        selected_stats=["latest", "loss"],
+    )
+    registry = er.async_get(hass)
+    task_one_id = f"{entry.entry_id}:node:{NODE_UUID}:ping:101:latest"
+    task_two_prefix = f"{entry.entry_id}:node:{NODE_UUID}:ping:202:"
+    task_two_entity_id = _entity_id(hass, "sensor", f"{task_two_prefix}latest")
+    remaining_tasks = parse_ping_tasks([{"id": 101, "name": "Task one"}])
+    coordinator = entry.runtime_data.coordinator
+
+    with (
+        patch.object(
+            coordinator.client,
+            "async_get_ping_tasks",
+            new=AsyncMock(return_value=remaining_tasks),
+        ),
+        patch.object(
+            coordinator.client,
+            "async_get_latest_status",
+            new=AsyncMock(return_value=coordinator.data.statuses),
+        ),
+    ):
+        for _ in range(3):
+            coordinator._last_ping_tasks_attempt = -1_000_000
+            coordinator.async_set_updated_data(await coordinator._async_update_data())
+            await hass.async_block_till_done()
+
+    assert registry.async_get_entity_id("sensor", DOMAIN, task_one_id) is not None
+    assert not any(
+        item.unique_id.startswith(task_two_prefix)
+        for item in er.async_entries_for_config_entry(registry, entry.entry_id)
+    )
+    assert hass.states.get(task_two_entity_id) is None
+    cpu_id = _entity_id(
+        hass,
+        "sensor",
+        _unique_id(entry.entry_id, f"node:{NODE_UUID}", "cpu_usage"),
+    )
+    assert _state(hass, cpu_id).state != STATE_UNAVAILABLE
+
+
+async def test_reload_cleans_deselected_ping_tasks_and_statistics(
+    hass: HomeAssistant,
+) -> None:
+    """Options reload removes old task and advanced-stat registry entries."""
+    task_payloads = [
+        {"id": 101, "name": "Task one"},
+        {"id": 202, "name": "Task two"},
+    ]
+    stats_payloads = [
+        {"entity_id": NODE_UUID, "task_id": 101, "latest": 10, "loss": 0},
+        {"entity_id": NODE_UUID, "task_id": 202, "latest": 20, "loss": 5},
+    ]
+    entry = await _setup_ping_entry(
+        hass,
+        task_payloads=task_payloads,
+        stats_payloads=stats_payloads,
+        selected_task_ids=["101", "202"],
+        selected_stats=["latest", "loss"],
+    )
+    current = entry.runtime_data.coordinator.data
+    bootstrap = KomariBootstrapData(
+        panel=current.panel,
+        nodes=current.nodes,
+        statuses=current.statuses,
+        capabilities=current.capabilities,
+    )
+    tasks = parse_ping_tasks(task_payloads)
+    stats = parse_ping_metric_stats({"stats": stats_payloads})
+    hass.config_entries.async_update_entry(
+        entry,
+        options={
+            CONF_PING_TASK_IDS: ["101"],
+            CONF_PING_STAT_KEYS: ["latest"],
+        },
+    )
+    with (
+        patch(
+            "custom_components.komari.api.KomariApiClient.async_get_bootstrap",
+            new=AsyncMock(return_value=bootstrap),
+        ),
+        patch(
+            "custom_components.komari.api.KomariApiClient.async_get_ping_tasks",
+            new=AsyncMock(return_value=tasks),
+        ),
+        patch(
+            "custom_components.komari.api.KomariApiClient.async_get_ping_stats",
+            new=AsyncMock(return_value=stats),
+        ),
+    ):
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+
+    registry = er.async_get(hass)
+    retained = f"{entry.entry_id}:node:{NODE_UUID}:ping:101:latest"
+    removed = {
+        f"{entry.entry_id}:node:{NODE_UUID}:ping:101:loss",
+        f"{entry.entry_id}:node:{NODE_UUID}:ping:202:latest",
+        f"{entry.entry_id}:node:{NODE_UUID}:ping:202:loss",
+    }
+    assert registry.async_get_entity_id("sensor", DOMAIN, retained) is not None
+    assert all(
+        registry.async_get_entity_id("sensor", DOMAIN, unique_id) is None
+        for unique_id in removed
+    )
+
+
+async def test_manual_device_removal_uses_latest_successful_raw_inventory(
+    hass: HomeAssistant,
+) -> None:
+    """Panel/current nodes are protected while one retained missing node is allowed."""
+    bootstrap = _bootstrap(
+        node_payloads=[
+            _node_payload(NODE_UUID),
+            _node_payload(SECOND_NODE_UUID, name="Second node"),
+        ],
+        status_payloads=[
+            _status_payload(NODE_UUID),
+            _status_payload(SECOND_NODE_UUID),
+        ],
+    )
+    entry = await _setup_entry(hass, bootstrap)
+    registry = dr.async_get(hass)
+    panel = get_panel_device(registry, entry.entry_id)
+    first = get_node_device(registry, entry.entry_id, NODE_UUID)
+    second = get_node_device(registry, entry.entry_id, SECOND_NODE_UUID)
+    assert panel is not None
+    assert first is not None
+    assert second is not None
+    assert not await async_remove_config_entry_device(hass, entry, panel)
+    assert not await async_remove_config_entry_device(hass, entry, second)
+
+    coordinator = entry.runtime_data.coordinator
+    with (
+        patch.object(
+            coordinator.client,
+            "async_get_nodes",
+            new=AsyncMock(return_value=parse_nodes([_node_payload(NODE_UUID)])),
+        ),
+        patch.object(
+            coordinator.client,
+            "async_get_latest_status",
+            new=AsyncMock(return_value=parse_statuses([_status_payload(NODE_UUID)])),
+        ),
+    ):
+        coordinator._last_inventory_attempt = -1_000_000
+        coordinator.async_set_updated_data(await coordinator._async_update_data())
+        await hass.async_block_till_done()
+
+    assert not await async_remove_config_entry_device(hass, entry, first)
+    assert await async_remove_config_entry_device(hass, entry, second)
 
 
 def test_description_defaults_match_the_p1_contract() -> None:

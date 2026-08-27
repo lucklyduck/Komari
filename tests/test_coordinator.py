@@ -313,6 +313,8 @@ async def test_node_requires_three_successful_inventory_misses(
     removed = await coordinator._async_update_data()
     assert set(removed.nodes) == {"node-1"}
     assert coordinator.node_missing_counts == {}
+    assert coordinator.last_observed_node_ids == {"node-1"}
+    assert coordinator.confirmed_removed_node_ids == {"node-2"}
 
 
 async def test_node_reappearance_resets_count_and_failure_does_not_increment(
@@ -488,6 +490,29 @@ async def test_ping_task_requires_three_successful_task_list_misses(
     removed = await coordinator._async_update_data()
     assert set(removed.ping_tasks) == {"101"}
     assert coordinator.ping_task_missing_counts == {}
+    assert coordinator.confirmed_removed_ping_task_ids == {"202"}
+
+
+async def test_registry_only_identities_are_confirmed_after_three_lists(
+    hass: HomeAssistant,
+) -> None:
+    """Stale registry identities can be cleaned even without snapshot metadata."""
+    capabilities = frozenset(
+        {METHOD_LATEST_STATUS, METHOD_PUBLIC_NODES, METHOD_PUBLIC_PING_TASKS}
+    )
+    client = FakeKomariClient(_bootstrap(capabilities=capabilities))
+    coordinator = _coordinator(hass, client)
+    await coordinator._async_update_data()
+    coordinator.track_registry_node_ids(["registry-only-node"])
+    coordinator.track_registry_ping_task_ids(["registry-only-task"])
+
+    for _ in range(3):
+        coordinator._last_inventory_attempt = -1_000_000
+        coordinator._last_ping_tasks_attempt = -1_000_000
+        await coordinator._async_update_data()
+
+    assert coordinator.confirmed_removed_node_ids == {"registry-only-node"}
+    assert coordinator.confirmed_removed_ping_task_ids == {"registry-only-task"}
 
 
 async def test_ping_task_method_failure_retains_task_without_counting(

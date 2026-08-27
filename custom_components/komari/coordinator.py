@@ -36,7 +36,7 @@ from .exceptions import (
 from .options import KomariOptions, get_options
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
     from homeassistant.core import HomeAssistant
 
@@ -161,6 +161,11 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
         }
         self._node_missing_counts: dict[str, int] = {}
         self._ping_task_missing_counts: dict[str, int] = {}
+        self._tracked_node_ids: set[str] = set()
+        self._tracked_ping_task_ids: set[str] = set(self.options.ping_task_ids)
+        self._last_observed_node_ids: frozenset[str] = frozenset()
+        self._confirmed_removed_node_ids: set[str] = set()
+        self._confirmed_removed_ping_task_ids: set[str] = set()
 
     @property
     def branch_states(self) -> Mapping[str, KomariBranchState]:
@@ -182,6 +187,29 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
     def ping_task_missing_counts(self) -> Mapping[str, int]:
         """Return current authoritative Ping-task absence counters."""
         return MappingProxyType(dict(self._ping_task_missing_counts))
+
+    @property
+    def last_observed_node_ids(self) -> frozenset[str]:
+        """Return node IDs from the most recent successful raw inventory."""
+        return self._last_observed_node_ids
+
+    @property
+    def confirmed_removed_node_ids(self) -> frozenset[str]:
+        """Return nodes confirmed absent during this coordinator lifetime."""
+        return frozenset(self._confirmed_removed_node_ids)
+
+    @property
+    def confirmed_removed_ping_task_ids(self) -> frozenset[str]:
+        """Return Ping tasks confirmed absent during this coordinator lifetime."""
+        return frozenset(self._confirmed_removed_ping_task_ids)
+
+    def track_registry_node_ids(self, node_ids: Iterable[str]) -> None:
+        """Include pre-existing registry nodes in future absence confirmation."""
+        self._tracked_node_ids.update(node_ids)
+
+    def track_registry_ping_task_ids(self, task_ids: Iterable[str]) -> None:
+        """Include pre-existing registry tasks in future absence confirmation."""
+        self._tracked_ping_task_ids.update(task_ids)
 
     @override
     async def _async_update_data(self) -> KomariSnapshot:
@@ -207,11 +235,15 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
             except KomariError as err:
                 self._record_failure(BRANCH_INVENTORY, err)
             else:
-                nodes = _retain_until_confirmed_missing(
+                self._last_observed_node_ids = frozenset(observed_nodes)
+                nodes, removed_node_ids = _retain_until_confirmed_missing(
                     nodes,
                     observed_nodes,
                     self._node_missing_counts,
+                    self._tracked_node_ids,
                 )
+                self._confirmed_removed_node_ids.difference_update(observed_nodes)
+                self._confirmed_removed_node_ids.update(removed_node_ids)
                 self._record_success(BRANCH_INVENTORY)
 
         if self._ping_tasks_are_due(now):
@@ -267,6 +299,8 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
         self._record_success(BRANCH_CORE)
         self._record_success(BRANCH_INVENTORY)
         self._record_success(BRANCH_CAPABILITIES)
+        self._last_observed_node_ids = frozenset(bootstrap.nodes)
+        self._tracked_node_ids.update(bootstrap.nodes)
 
         snapshot = KomariSnapshot.from_bootstrap(
             bootstrap,
@@ -332,11 +366,14 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
         except KomariError as err:
             self._record_failure(BRANCH_PING_TASKS, err)
             return prior, capabilities
-        retained_tasks = _retain_until_confirmed_missing(
+        retained_tasks, removed_task_ids = _retain_until_confirmed_missing(
             prior,
             tasks,
             self._ping_task_missing_counts,
+            self._tracked_ping_task_ids,
         )
+        self._confirmed_removed_ping_task_ids.difference_update(tasks)
+        self._confirmed_removed_ping_task_ids.update(removed_task_ids)
         self._record_success(BRANCH_PING_TASKS)
         return retained_tasks, capabilities
 
@@ -495,21 +532,27 @@ def _retain_until_confirmed_missing[T](
     prior: Mapping[str, T],
     observed: Mapping[str, T],
     missing_counts: dict[str, int],
-) -> Mapping[str, T]:
+    tracked_ids: set[str],
+) -> tuple[Mapping[str, T], frozenset[str]]:
     """Retain absent authoritative items until three successful list misses."""
     retained = dict(observed)
     for identifier in observed:
+        tracked_ids.add(identifier)
         missing_counts.pop(identifier, None)
-    for identifier, value in prior.items():
+    removed: set[str] = set()
+    for identifier in tuple(tracked_ids):
         if identifier in observed:
             continue
         misses = missing_counts.get(identifier, 0) + 1
         if misses >= AUTHORITATIVE_MISSING_THRESHOLD:
             missing_counts.pop(identifier, None)
+            tracked_ids.remove(identifier)
+            removed.add(identifier)
             continue
         missing_counts[identifier] = misses
-        retained[identifier] = value
-    return MappingProxyType(retained)
+        if identifier in prior:
+            retained[identifier] = prior[identifier]
+    return MappingProxyType(retained), frozenset(removed)
 
 
 def _error_category(error: Exception) -> str:

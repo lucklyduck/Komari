@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 
 from homeassistant.const import CONF_URL, CONF_VERIFY_SSL
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import KomariApiClient
@@ -14,6 +16,14 @@ from .const import CONF_API_KEY, DEFAULT_VERIFY_SSL, DOMAIN, PLATFORMS
 from .coordinator import KomariDataUpdateCoordinator
 from .data import KomariConfigEntry, KomariRuntimeData
 from .device import register_devices
+from .lifecycle import (
+    node_uuid_from_identifiers,
+    registry_node_ids,
+    registry_ping_task_ids,
+    remove_disallowed_ping_entities,
+    remove_node_registry_entries,
+)
+from .options import get_options
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -70,6 +80,22 @@ async def async_setup_entry(
     coordinator = KomariDataUpdateCoordinator(hass, entry, client)
     await coordinator.async_config_entry_first_refresh()
 
+    device_registry = dr.async_get(hass)
+    entity_registry = er.async_get(hass)
+    coordinator.track_registry_node_ids(
+        registry_node_ids(device_registry, entry.entry_id)
+    )
+    coordinator.track_registry_ping_task_ids(
+        registry_ping_task_ids(entity_registry, entry.entry_id)
+    )
+    options = get_options(entry)
+    remove_disallowed_ping_entities(
+        entity_registry,
+        entry.entry_id,
+        allowed_task_ids=options.ping_task_ids,
+        allowed_stat_keys=options.ping_stat_keys,
+    )
+
     panel = register_devices(hass, entry, coordinator.data)
     entry.runtime_data = KomariRuntimeData(
         client=client,
@@ -79,6 +105,20 @@ async def async_setup_entry(
 
     def _sync_devices() -> None:
         register_devices(hass, entry, coordinator.data)
+        for node_uuid in coordinator.confirmed_removed_node_ids:
+            remove_node_registry_entries(
+                device_registry,
+                entity_registry,
+                entry.entry_id,
+                node_uuid,
+            )
+        remove_disallowed_ping_entities(
+            entity_registry,
+            entry.entry_id,
+            allowed_task_ids=options.ping_task_ids,
+            allowed_stat_keys=options.ping_stat_keys,
+            confirmed_removed_task_ids=(coordinator.confirmed_removed_ping_task_ids),
+        )
 
     entry.async_on_unload(coordinator.async_add_listener(_sync_devices))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -91,3 +131,19 @@ async def async_unload_entry(
 ) -> bool:
     """Unload one Komari panel and its platforms."""
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant,
+    config_entry: KomariConfigEntry,
+    device_entry: dr.DeviceEntry,
+) -> bool:
+    """Allow manual removal only after a node leaves the latest raw inventory."""
+    if (
+        node_uuid := node_uuid_from_identifiers(
+            config_entry.entry_id,
+            device_entry.identifiers,
+        )
+    ) is None:
+        return False
+    return node_uuid not in config_entry.runtime_data.coordinator.last_observed_node_ids
