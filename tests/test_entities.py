@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
@@ -13,9 +14,18 @@ from custom_components.komari.binary_sensor import (
 from custom_components.komari.const import (
     CONF_ENABLE_EXPIRY_ENTITIES,
     CONF_ENABLE_TRAFFIC_ENTITIES,
+    CONF_PING_STAT_KEYS,
+    CONF_PING_TASK_IDS,
     DOMAIN,
+    MAX_PING_ENTITIES,
+    METHOD_PING_METRIC_STATS,
+    METHOD_PUBLIC_PING_TASKS,
 )
-from custom_components.komari.coordinator import KomariSnapshot
+from custom_components.komari.coordinator import (
+    BRANCH_PING_STATS,
+    KomariBranchState,
+    KomariSnapshot,
+)
 from custom_components.komari.device import get_node_device, get_panel_device
 from custom_components.komari.models import (
     KomariBootstrapData,
@@ -24,12 +34,15 @@ from custom_components.komari.models import (
     KomariPanelInfo,
     TrafficLimitType,
     parse_nodes,
+    parse_ping_metric_stats,
+    parse_ping_tasks,
     parse_statuses,
 )
 from custom_components.komari.sensor import (
     EXPIRY_SENSOR_DESCRIPTIONS,
     NODE_SENSOR_DESCRIPTIONS,
     PANEL_SENSOR_DESCRIPTIONS,
+    PING_SENSOR_DESCRIPTIONS,
     TRAFFIC_METADATA_SENSOR_DESCRIPTIONS,
     TRAFFIC_STATUS_SENSOR_DESCRIPTIONS,
     traffic_used_by_limit_rule,
@@ -133,6 +146,7 @@ def _bootstrap(
     panel_name: str = "Komari Lab",
     node_payloads: list[dict[str, Any]] | None = None,
     status_payloads: list[dict[str, Any]] | None = None,
+    capabilities: frozenset[str] | None = None,
 ) -> KomariBootstrapData:
     """Build a complete fake panel snapshot."""
     nodes = parse_nodes(node_payloads or [_node_payload()])
@@ -147,7 +161,7 @@ def _bootstrap(
         ),
         nodes=nodes,
         statuses=statuses,
-        capabilities=frozenset(),
+        capabilities=capabilities or frozenset(),
     )
 
 
@@ -174,6 +188,49 @@ async def _setup_entry(
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
     return cast("KomariConfigEntry", entry)
+
+
+async def _setup_ping_entry(
+    hass: HomeAssistant,
+    *,
+    task_payloads: list[dict[str, Any]],
+    stats_payloads: list[dict[str, Any]],
+    selected_task_ids: list[str],
+    selected_stats: list[str],
+    node_payloads: list[dict[str, Any]] | None = None,
+    status_payloads: list[dict[str, Any]] | None = None,
+    title: str = "Komari Lab",
+    url: str = "https://example.test",
+) -> KomariConfigEntry:
+    """Set up a real entity platform with deterministic Ping branches."""
+    tasks = parse_ping_tasks(task_payloads)
+    stats = parse_ping_metric_stats({"stats": stats_payloads})
+    bootstrap = _bootstrap(
+        panel_name=title,
+        node_payloads=node_payloads,
+        status_payloads=status_payloads,
+        capabilities=frozenset({METHOD_PUBLIC_PING_TASKS, METHOD_PING_METRIC_STATS}),
+    )
+    with (
+        patch(
+            "custom_components.komari.api.KomariApiClient.async_get_ping_tasks",
+            new=AsyncMock(return_value=tasks),
+        ),
+        patch(
+            "custom_components.komari.api.KomariApiClient.async_get_ping_stats",
+            new=AsyncMock(return_value=stats),
+        ),
+    ):
+        return await _setup_entry(
+            hass,
+            bootstrap,
+            title=title,
+            url=url,
+            options={
+                CONF_PING_TASK_IDS: selected_task_ids,
+                CONF_PING_STAT_KEYS: selected_stats,
+            },
+        )
 
 
 def _unique_id(entry_id: str, scope: str, key: str) -> str:
@@ -1342,6 +1399,258 @@ async def test_two_panels_keep_same_uuid_traffic_entities_separate(
     assert _state(hass, entity_b).state == "400"
 
 
+async def test_ping_entities_use_stable_identity_units_and_field_availability(
+    hass: HomeAssistant,
+) -> None:
+    """One returned series creates selected fields, including missing fields."""
+    entry = await _setup_ping_entry(
+        hass,
+        task_payloads=[
+            {
+                "id": 101,
+                "name": "Example endpoint",
+                "clients": [NODE_UUID, "hidden-node"],
+                "type": "http",
+            }
+        ],
+        stats_payloads=[
+            {
+                "entity_id": NODE_UUID,
+                "task_id": 101,
+                "latest": 12.5,
+                "loss": 0,
+            },
+            {
+                "entity_id": "hidden-node",
+                "task_id": 101,
+                "latest": 99,
+                "loss": 50,
+            },
+        ],
+        selected_task_ids=["101"],
+        selected_stats=["latest", "loss", "min"],
+    )
+    prefix = f"{entry.entry_id}:node:{NODE_UUID}:ping:101"
+    latest_id = _entity_id(hass, "sensor", f"{prefix}:latest")
+    loss_id = _entity_id(hass, "sensor", f"{prefix}:loss")
+    minimum_id = _entity_id(hass, "sensor", f"{prefix}:min")
+
+    latest = _state(hass, latest_id)
+    assert float(latest.state) == 12.5
+    assert latest.attributes[ATTR_DEVICE_CLASS] == SensorDeviceClass.DURATION
+    assert latest.attributes[ATTR_UNIT_OF_MEASUREMENT] == UnitOfTime.MILLISECONDS
+    assert float(_state(hass, loss_id).state) == 0
+    assert _state(hass, loss_id).attributes[ATTR_UNIT_OF_MEASUREMENT] == PERCENTAGE
+    assert _state(hass, minimum_id).state == STATE_UNAVAILABLE
+
+    registry = er.async_get(hass)
+    hidden_prefix = f"{entry.entry_id}:node:hidden-node:ping:"
+    assert not any(
+        item.unique_id.startswith(hidden_prefix)
+        for item in er.async_entries_for_config_entry(registry, entry.entry_id)
+    )
+
+
+async def test_ping_entities_follow_online_and_two_failure_ttl(
+    hass: HomeAssistant,
+) -> None:
+    """Node state and Ping staleness do not affect ordinary core entities."""
+    entry = await _setup_ping_entry(
+        hass,
+        task_payloads=[{"id": 101, "name": "Example endpoint"}],
+        stats_payloads=[
+            {"entity_id": NODE_UUID, "task_id": 101, "latest": 8, "loss": 0}
+        ],
+        selected_task_ids=["101"],
+        selected_stats=["latest"],
+    )
+    ping_id = _entity_id(
+        hass,
+        "sensor",
+        f"{entry.entry_id}:node:{NODE_UUID}:ping:101:latest",
+    )
+    cpu_id = _entity_id(
+        hass,
+        "sensor",
+        _unique_id(entry.entry_id, f"node:{NODE_UUID}", "cpu_usage"),
+    )
+    coordinator = entry.runtime_data.coordinator
+
+    offline = parse_statuses([_status_payload(online=False)])
+    coordinator.async_set_updated_data(replace(coordinator.data, statuses=offline))
+    await hass.async_block_till_done()
+    assert _state(hass, ping_id).state == STATE_UNAVAILABLE
+
+    coordinator._branch_states[BRANCH_PING_STATS] = KomariBranchState(
+        fetched_at=datetime.now(tz=UTC),
+        error_category="connection",
+        consecutive_failures=2,
+    )
+    online = parse_statuses([_status_payload()])
+    coordinator.async_set_updated_data(replace(coordinator.data, statuses=online))
+    await hass.async_block_till_done()
+    assert _state(hass, ping_id).state == STATE_UNAVAILABLE
+    assert _state(hass, cpu_id).state != STATE_UNAVAILABLE
+
+
+async def test_ping_entities_add_new_series_once_and_ignore_unselected_stats(
+    hass: HomeAssistant,
+) -> None:
+    """Actual result discovery is dynamic without speculative advanced entities."""
+    entry = await _setup_ping_entry(
+        hass,
+        task_payloads=[
+            {"id": 101, "name": "Task one"},
+            {"id": 102, "name": "Task two"},
+        ],
+        stats_payloads=[
+            {
+                "entity_id": NODE_UUID,
+                "task_id": 101,
+                "latest": 10,
+                "loss": 0,
+                "p99": 20,
+            }
+        ],
+        selected_task_ids=["101", "102"],
+        selected_stats=["latest", "loss"],
+    )
+    registry = er.async_get(hass)
+    task_two_latest = f"{entry.entry_id}:node:{NODE_UUID}:ping:102:latest"
+    unselected_p99 = f"{entry.entry_id}:node:{NODE_UUID}:ping:101:p99"
+    assert registry.async_get_entity_id("sensor", DOMAIN, task_two_latest) is None
+    assert registry.async_get_entity_id("sensor", DOMAIN, unselected_p99) is None
+
+    new_stats = parse_ping_metric_stats(
+        {
+            "stats": [
+                {"entity_id": NODE_UUID, "task_id": 101, "latest": 10, "loss": 0},
+                {"entity_id": NODE_UUID, "task_id": 102, "latest": 30, "loss": 5},
+            ]
+        }
+    )
+    coordinator = entry.runtime_data.coordinator
+    coordinator.async_set_updated_data(replace(coordinator.data, ping_stats=new_stats))
+    await hass.async_block_till_done()
+    entity_id = _entity_id(hass, "sensor", task_two_latest)
+    assert float(_state(hass, entity_id).state) == 30
+
+    before = len(er.async_entries_for_config_entry(registry, entry.entry_id))
+    coordinator.async_set_updated_data(coordinator.data)
+    await hass.async_block_till_done()
+    assert len(er.async_entries_for_config_entry(registry, entry.entry_id)) == before
+
+
+async def test_ping_task_rename_changes_display_not_unique_id(
+    hass: HomeAssistant,
+) -> None:
+    """Task names remain presentation data and never become entity identity."""
+    entry = await _setup_ping_entry(
+        hass,
+        task_payloads=[{"id": 101, "name": "Old endpoint"}],
+        stats_payloads=[
+            {"entity_id": NODE_UUID, "task_id": 101, "latest": 10, "loss": 0}
+        ],
+        selected_task_ids=["101"],
+        selected_stats=["latest"],
+    )
+    unique_id = f"{entry.entry_id}:node:{NODE_UUID}:ping:101:latest"
+    entity_id = _entity_id(hass, "sensor", unique_id)
+    renamed_tasks = parse_ping_tasks([{"id": 101, "name": "Renamed endpoint"}])
+    coordinator = entry.runtime_data.coordinator
+    coordinator.async_set_updated_data(
+        replace(coordinator.data, ping_tasks=renamed_tasks)
+    )
+    await hass.async_block_till_done()
+
+    registry = er.async_get(hass)
+    assert registry.async_get_entity_id("sensor", DOMAIN, unique_id) == entity_id
+    assert "Renamed endpoint" in _state(hass, entity_id).attributes["friendly_name"]
+
+
+async def test_ping_entity_creation_stops_at_per_entry_limit(
+    hass: HomeAssistant,
+) -> None:
+    """Inventory growth cannot create more than 256 Ping entities per panel."""
+    node_payloads = [
+        _node_payload(f"node-{index}", name=f"Node {index}") for index in range(1, 6)
+    ]
+    status_payloads = [_status_payload(f"node-{index}") for index in range(1, 6)]
+    task_payloads = [{"id": index, "name": f"Task {index}"} for index in range(1, 9)]
+    stats_payloads = [
+        {
+            "entity_id": f"node-{node_index}",
+            "task_id": task_index,
+            "latest": 1,
+            "loss": 0,
+            "min": 1,
+            "max": 1,
+            "avg": 1,
+            "p50": 1,
+            "p99": 1,
+            "stddev": 0,
+        }
+        for node_index in range(1, 6)
+        for task_index in range(1, 9)
+    ]
+    entry = await _setup_ping_entry(
+        hass,
+        task_payloads=task_payloads,
+        stats_payloads=stats_payloads,
+        selected_task_ids=[str(index) for index in range(1, 9)],
+        selected_stats=[description.key for description in PING_SENSOR_DESCRIPTIONS],
+        node_payloads=node_payloads,
+        status_payloads=status_payloads,
+    )
+
+    ping_entries = [
+        item
+        for item in er.async_entries_for_config_entry(
+            er.async_get(hass), entry.entry_id
+        )
+        if ":ping:" in item.unique_id
+    ]
+    assert len(ping_entries) == MAX_PING_ENTITIES
+
+
+async def test_two_panels_keep_same_ping_identity_inputs_separate(
+    hass: HomeAssistant,
+) -> None:
+    """Entry IDs isolate identical node UUIDs and Ping task IDs."""
+    common: dict[str, Any] = {
+        "task_payloads": [{"id": 101, "name": "Shared task"}],
+        "selected_task_ids": ["101"],
+        "selected_stats": ["latest"],
+    }
+    entry_a = await _setup_ping_entry(
+        hass,
+        **common,
+        stats_payloads=[
+            {"entity_id": NODE_UUID, "task_id": 101, "latest": 10, "loss": 0}
+        ],
+        title="Panel A",
+        url="https://ping-a.example.test",
+    )
+    entry_b = await _setup_ping_entry(
+        hass,
+        **common,
+        stats_payloads=[
+            {"entity_id": NODE_UUID, "task_id": 101, "latest": 20, "loss": 0}
+        ],
+        title="Panel B",
+        url="https://ping-b.example.test",
+    )
+    unique_a = f"{entry_a.entry_id}:node:{NODE_UUID}:ping:101:latest"
+    unique_b = f"{entry_b.entry_id}:node:{NODE_UUID}:ping:101:latest"
+    entity_a = _entity_id(hass, "sensor", unique_a)
+    entity_b = _entity_id(hass, "sensor", unique_b)
+
+    assert unique_a != unique_b
+    assert entity_a != entity_b
+    assert float(_state(hass, entity_a).state) == 10
+    assert float(_state(hass, entity_b).state) == 20
+
+
 def test_description_defaults_match_the_p1_contract() -> None:
     """Description tables encode the planned default enablement policy."""
     panel = {description.key: description for description in PANEL_SENSOR_DESCRIPTIONS}
@@ -1387,3 +1696,7 @@ def test_description_defaults_match_the_p1_contract() -> None:
         is True
     )
     assert traffic_status["traffic_limit_usage"].entity_registry_enabled_default is True
+    assert all(
+        description.entity_registry_enabled_default
+        for description in PING_SENSOR_DESCRIPTIONS
+    )

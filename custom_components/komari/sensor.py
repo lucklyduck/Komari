@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, cast, override
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -23,9 +23,9 @@ from homeassistant.core import callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN
+from .const import DOMAIN, MAX_PING_ENTITIES
 from .entity import KomariNodeEntity, KomariPanelEntity
-from .models import TrafficLimitType
+from .models import KomariPingSeriesKey, KomariPingStats, TrafficLimitType
 from .options import get_options
 
 if TYPE_CHECKING:
@@ -196,6 +196,13 @@ class KomariNodeTrafficSensorEntityDescription(SensorEntityDescription):
 
     value_fn: Callable[[KomariNode, KomariNodeStatus], SensorValue]
     create_fn: Callable[[KomariNode], bool]
+
+
+@dataclass(frozen=True, kw_only=True)
+class KomariNodePingSensorEntityDescription(SensorEntityDescription):
+    """Describe one selected Ping statistic on a node."""
+
+    value_fn: Callable[[KomariPingStats], SensorValue]
 
 
 PANEL_SENSOR_DESCRIPTIONS: tuple[KomariPanelSensorEntityDescription, ...] = (
@@ -515,6 +522,80 @@ TRAFFIC_SENSOR_KEYS = frozenset(
     )
 )
 
+PING_SENSOR_DESCRIPTIONS: tuple[KomariNodePingSensorEntityDescription, ...] = (
+    KomariNodePingSensorEntityDescription(
+        key="latest",
+        translation_key="ping_latest",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.MILLISECONDS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=lambda stats: stats.latest,
+    ),
+    KomariNodePingSensorEntityDescription(
+        key="loss",
+        translation_key="ping_loss",
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=lambda stats: stats.loss,
+    ),
+    KomariNodePingSensorEntityDescription(
+        key="min",
+        translation_key="ping_min",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.MILLISECONDS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=lambda stats: stats.minimum,
+    ),
+    KomariNodePingSensorEntityDescription(
+        key="max",
+        translation_key="ping_max",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.MILLISECONDS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=lambda stats: stats.maximum,
+    ),
+    KomariNodePingSensorEntityDescription(
+        key="avg",
+        translation_key="ping_avg",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.MILLISECONDS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=lambda stats: stats.average,
+    ),
+    KomariNodePingSensorEntityDescription(
+        key="p50",
+        translation_key="ping_p50",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.MILLISECONDS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=lambda stats: stats.p50,
+    ),
+    KomariNodePingSensorEntityDescription(
+        key="p99",
+        translation_key="ping_p99",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.MILLISECONDS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=lambda stats: stats.p99,
+    ),
+    KomariNodePingSensorEntityDescription(
+        key="stddev",
+        translation_key="ping_stddev",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.MILLISECONDS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=lambda stats: stats.stddev,
+    ),
+)
+
 
 class KomariPanelSensor(KomariPanelEntity, SensorEntity):
     """A sensor on the panel service device."""
@@ -649,6 +730,68 @@ class KomariNodeTrafficSensor(KomariNodeEntity, SensorEntity):
         }
 
 
+class KomariNodePingSensor(KomariNodeEntity, SensorEntity):
+    """One selected Ping statistic attached to a visible node."""
+
+    entity_description: KomariNodePingSensorEntityDescription
+
+    def __init__(
+        self,
+        entry: KomariConfigEntry,
+        node_uuid: str,
+        task_id: str,
+        description: KomariNodePingSensorEntityDescription,
+    ) -> None:
+        """Initialize a stable node/task/statistic entity."""
+        super().__init__(entry, node_uuid, description)
+        self._series_key = KomariPingSeriesKey(node_uuid, task_id)
+        self._task_id = task_id
+        self._attr_unique_id = (
+            f"{entry.entry_id}:node:{node_uuid}:ping:{task_id}:{description.key}"
+        )
+        self._last_task_name = task_id
+        self._update_task_name()
+
+    def _update_task_name(self) -> None:
+        """Keep display text current without making the name part of identity."""
+        task_name = self._last_task_name
+        if task := self.coordinator.data.ping_tasks.get(self._task_id):
+            task_name = task.name
+        if task_name != self._last_task_name:
+            self._last_task_name = task_name
+            cast("dict[str, object]", self.__dict__).pop("name", None)
+        self._attr_translation_placeholders = {
+            "task_name": self._last_task_name,
+        }
+
+    @property
+    @override
+    def native_value(self) -> SensorValue:
+        """Return only the selected field from the current Ping series."""
+        if stats := self.coordinator.data.ping_stats.get(self._series_key):
+            return self.entity_description.value_fn(stats)
+        return None
+
+    @property
+    @override
+    def available(self) -> bool:
+        """Require an online node and non-stale Ping data for this field."""
+        return (
+            super().available
+            and (status := self.status) is not None
+            and status.online
+            and self.coordinator.ping_stats_available
+            and self.native_value is not None
+        )
+
+    @callback
+    @override
+    def _handle_coordinator_update(self) -> None:
+        """Refresh the task display name before publishing the new state."""
+        self._update_task_name()
+        super()._handle_coordinator_update()
+
+
 def _remove_node_sensor_keys(
     registry: er.EntityRegistry,
     entry_id: str,
@@ -699,6 +842,7 @@ async def async_setup_entry(
     )
 
     known_entity_keys: set[tuple[str, str]] = set()
+    known_ping_entity_keys: set[tuple[str, str, str]] = set()
 
     @callback
     def _async_add_new_node_entities() -> None:
@@ -745,6 +889,35 @@ async def async_setup_entry(
                     entities.append(
                         KomariNodeTrafficSensor(entry, node_uuid, description)
                     )
+        selected_tasks = frozenset(options.ping_task_ids)
+        selected_stats = frozenset(options.ping_stat_keys)
+        for series_key in coordinator.data.ping_stats:
+            if (
+                series_key.node_uuid not in coordinator.data.nodes
+                or series_key.task_id not in selected_tasks
+            ):
+                continue
+            for description in PING_SENSOR_DESCRIPTIONS:
+                entity_key = (
+                    series_key.node_uuid,
+                    series_key.task_id,
+                    description.key,
+                )
+                if (
+                    description.key not in selected_stats
+                    or entity_key in known_ping_entity_keys
+                    or len(known_ping_entity_keys) >= MAX_PING_ENTITIES
+                ):
+                    continue
+                known_ping_entity_keys.add(entity_key)
+                entities.append(
+                    KomariNodePingSensor(
+                        entry,
+                        series_key.node_uuid,
+                        series_key.task_id,
+                        description,
+                    )
+                )
         if entities:
             async_add_entities(entities)
 

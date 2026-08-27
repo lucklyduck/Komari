@@ -239,6 +239,30 @@
       },
       "udp_connections": {
         "name": "UDP 连接数"
+      },
+      "ping_latest": {
+        "name": "{task_name} 最新延迟"
+      },
+      "ping_loss": {
+        "name": "{task_name} 丢包率"
+      },
+      "ping_min": {
+        "name": "{task_name} 最小延迟"
+      },
+      "ping_max": {
+        "name": "{task_name} 最大延迟"
+      },
+      "ping_avg": {
+        "name": "{task_name} 平均延迟"
+      },
+      "ping_p50": {
+        "name": "{task_name} P50 延迟"
+      },
+      "ping_p99": {
+        "name": "{task_name} P99 延迟"
+      },
+      "ping_stddev": {
+        "name": "{task_name} 延迟标准差"
       }
     }
   },

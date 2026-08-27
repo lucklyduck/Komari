@@ -239,6 +239,30 @@
       },
       "udp_connections": {
         "name": "UDP connections"
+      },
+      "ping_latest": {
+        "name": "{task_name} latest latency"
+      },
+      "ping_loss": {
+        "name": "{task_name} packet loss"
+      },
+      "ping_min": {
+        "name": "{task_name} minimum latency"
+      },
+      "ping_max": {
+        "name": "{task_name} maximum latency"
+      },
+      "ping_avg": {
+        "name": "{task_name} average latency"
+      },
+      "ping_p50": {
+        "name": "{task_name} P50 latency"
+      },
+      "ping_p99": {
+        "name": "{task_name} P99 latency"
+      },
+      "ping_stddev": {
+        "name": "{task_name} latency standard deviation"
       }
     }
   },
