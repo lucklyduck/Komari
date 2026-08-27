@@ -5,4 +5,5 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/_common"
 
 exec uv run python -m tests.manual.smoke_rpc \
     --panel-a http://127.0.0.1:18881 \
-    --panel-b http://127.0.0.1:18882
+    --panel-b http://127.0.0.1:18882 \
+    --panel-c http://127.0.0.1:18883

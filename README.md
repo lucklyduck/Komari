@@ -113,28 +113,35 @@ bash script/develop --log-no-color
 开发配置保存在 `$HOME/.local/share/komari-ha/config`，源码会自动链接到其中。
 Web UI 通常位于 <http://127.0.0.1:8123>。
 
-## 双面板本地验收
+## 三面板本地验收
 
-第一个 WSL 终端启动两个只监听本机、数据完全脱敏的假 Komari 面板：
+第一个 WSL 终端启动三个只监听本机、数据完全脱敏的假 Komari 面板：
 
 ```bash
 bash script/fake-panels
 ```
 
-它们分别位于 `http://127.0.0.1:18881` 和
-`http://127.0.0.1:18882`，故意包含相同节点 UUID，并分别使用 RPC 节点清单的
-映射与数组响应。第二个终端执行协议级验收：
+它们分别位于 `http://127.0.0.1:18881`、`http://127.0.0.1:18882` 和
+`http://127.0.0.1:18883`。三者故意包含相同节点 UUID 和 Ping 任务 ID；A/B 分别
+使用 RPC 节点清单的映射与数组响应，C 是使用固定脱敏测试 Key 的私有面板。
+第二个终端执行协议级验收：
 
 ```bash
 bash script/smoke-fake-panels
 ```
 
-该检查覆盖相同 UUID 的面板隔离、单面板故障与恢复、节点动态发现。假面板还提供
-本地验收控制端点：
+该检查覆盖共享身份隔离、整面板与 Ping 分支故障、Method Not Found 回退、节点和
+任务增删改名、短延迟以及私有面板 Key 轮换。假面板还提供本地验收控制端点：
 
 - `POST /_control/fail`：模拟该面板 RPC 故障。
 - `POST /_control/recover`：恢复该面板。
 - `POST /_control/add-node`：加入一个固定测试节点。
+- `POST /_control/delete-node`、`rename-node`：删除或改名测试节点。
+- `POST /_control/add-task`、`remove-task`、`rename-task`：控制测试 Ping 任务。
+- `POST /_control/fail-ping`、`recover-ping`：只影响 Ping 分支。
+- `POST /_control/method-not-found`、`restore-method`：模拟首选 Ping 方法失效。
+- `POST /_control/delay`、`clear-delay`：增加或清除短响应延迟。
+- `POST /_control/rotate-key`：轮换私有 Fake C 的固定脱敏测试 Key。
 
 如需对获准测试的公开 Komari 面板执行一次匿名只读检查，可运行：
 

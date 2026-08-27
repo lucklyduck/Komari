@@ -1,7 +1,12 @@
-"""Tests for the local dual-panel acceptance helper."""
+"""Tests for the local three-panel acceptance helper."""
+
+from typing import Any, cast
 
 from tests.manual.fake_komari import (
     ADDED_NODE_UUID,
+    ADDED_TASK_ID,
+    FAKE_API_KEYS,
+    PING_METHODS,
     RPC_METHODS,
     SHARED_NODE_UUID,
     FakeKomariPanel,
@@ -25,7 +30,7 @@ def test_fake_panels_share_uuid_but_not_state() -> None:
 
 
 def test_fake_panel_capabilities_and_controls() -> None:
-    """The helper exposes P1 RPC methods and deterministic dynamic discovery."""
+    """The helper exposes P2 RPC methods and deterministic dynamic discovery."""
     panel = FakeKomariPanel("Panel A", node_list_as_mapping=True)
     assert panel.rpc_result("rpc.ping") == "pong"
     assert panel.rpc_result("rpc.version") == "2.0"
@@ -34,3 +39,90 @@ def test_fake_panel_capabilities_and_controls() -> None:
     panel.add_node()
     assert ADDED_NODE_UUID in panel.nodes
     assert ADDED_NODE_UUID in panel.statuses
+
+    panel.rename_shared_node()
+    assert panel.nodes[SHARED_NODE_UUID]["uuid"] == SHARED_NODE_UUID
+    assert "renamed" in panel.nodes[SHARED_NODE_UUID]["name"]
+    panel.delete_added_node()
+    assert ADDED_NODE_UUID not in panel.nodes
+
+
+def test_fake_panel_ping_tasks_stats_and_lifecycle_controls() -> None:
+    """Task identity, missing fields, records, and controls are deterministic."""
+    panel = FakeKomariPanel(
+        "Panel B",
+        node_list_as_mapping=False,
+        task_kind="tcp",
+        task_count=3,
+    )
+    tasks = cast(
+        "list[dict[str, Any]]",
+        panel.rpc_result("public:getPublicPingTasks"),
+    )
+    assert len(tasks) == 3
+    assert all(task["type"] == "tcp" for task in tasks)
+
+    stats_payload = cast(
+        "dict[str, Any]",
+        panel.rpc_result(
+            "public:getPingMetricStats",
+            {"entity_ids": [SHARED_NODE_UUID], "task_ids": ["101"]},
+        ),
+    )
+    assert len(stats_payload["stats"]) == 1
+    assert "min" not in stats_payload["stats"][0]
+    records_payload = cast("dict[str, Any]", panel.rpc_result("common:getRecords"))
+    assert records_payload["records"]
+
+    first_task_id = str(tasks[0]["id"])
+    panel.rename_first_task()
+    renamed = cast(
+        "list[dict[str, Any]]",
+        panel.rpc_result("public:getPublicPingTasks"),
+    )
+    assert str(renamed[0]["id"]) == first_task_id
+    assert "renamed" in renamed[0]["name"]
+    panel.add_task()
+    assert ADDED_TASK_ID in panel.tasks
+    panel.remove_added_task()
+    assert ADDED_TASK_ID not in panel.tasks
+
+    panel.ping_failing = True
+    assert PING_METHODS
+    panel.method_not_found.add("public:getPingMetricStats")
+    assert "public:getPingMetricStats" in panel.method_not_found
+
+
+def test_fake_private_panel_key_rotation_is_deterministic() -> None:
+    """Private Fake C rejects anonymous/old keys and accepts the replacement."""
+    panel = FakeKomariPanel(
+        "Panel C",
+        node_list_as_mapping=True,
+        private_site=True,
+    )
+    assert panel.is_authorized(None) is False
+    assert panel.is_authorized(f"Bearer {FAKE_API_KEYS[0]}") is True
+    panel.rotate_key()
+    assert panel.is_authorized(f"Bearer {FAKE_API_KEYS[0]}") is False
+    assert panel.is_authorized(f"Bearer {FAKE_API_KEYS[1]}") is True
+
+
+def test_fake_optional_hardware_and_traffic_shapes_are_explicit() -> None:
+    """Only the opted-in fake node advertises GPU and temperature support."""
+    without_optional = FakeKomariPanel("Panel B", node_list_as_mapping=False)
+    with_optional = FakeKomariPanel(
+        "Panel A",
+        node_list_as_mapping=True,
+        optional_hardware=True,
+    )
+    node_without = without_optional.nodes[SHARED_NODE_UUID]
+    status_without = without_optional.statuses[SHARED_NODE_UUID]
+    node_with = with_optional.nodes[SHARED_NODE_UUID]
+    status_with = with_optional.statuses[SHARED_NODE_UUID]
+
+    assert "gpu_name" not in node_without
+    assert "temp" not in status_without
+    assert node_without["traffic_limit_type"] == "max"
+    assert node_with["gpu_name"] == "Fake GPU"
+    assert status_with["temp"] == 42.5
+    assert node_with["traffic_limit_type"] == "sum"

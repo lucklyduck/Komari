@@ -1633,10 +1633,10 @@ async def test_ping_entity_creation_stops_at_per_entry_limit(
     assert len(ping_entries) == MAX_PING_ENTITIES
 
 
-async def test_two_panels_keep_same_ping_identity_inputs_separate(
+async def test_three_panels_keep_same_ping_identity_inputs_separate(
     hass: HomeAssistant,
 ) -> None:
-    """Entry IDs isolate identical node UUIDs and Ping task IDs."""
+    """Three Entry IDs isolate identical node UUIDs and Ping task IDs."""
     common: dict[str, Any] = {
         "task_payloads": [{"id": 101, "name": "Shared task"}],
         "selected_task_ids": ["101"],
@@ -1660,15 +1660,27 @@ async def test_two_panels_keep_same_ping_identity_inputs_separate(
         title="Panel B",
         url="https://ping-b.example.test",
     )
+    entry_c = await _setup_ping_entry(
+        hass,
+        **common,
+        stats_payloads=[
+            {"entity_id": NODE_UUID, "task_id": 101, "latest": 30, "loss": 0}
+        ],
+        title="Panel C",
+        url="https://ping-c.example.test",
+    )
     unique_a = f"{entry_a.entry_id}:node:{NODE_UUID}:ping:101:latest"
     unique_b = f"{entry_b.entry_id}:node:{NODE_UUID}:ping:101:latest"
+    unique_c = f"{entry_c.entry_id}:node:{NODE_UUID}:ping:101:latest"
     entity_a = _entity_id(hass, "sensor", unique_a)
     entity_b = _entity_id(hass, "sensor", unique_b)
+    entity_c = _entity_id(hass, "sensor", unique_c)
 
-    assert unique_a != unique_b
-    assert entity_a != entity_b
+    assert len({unique_a, unique_b, unique_c}) == 3
+    assert len({entity_a, entity_b, entity_c}) == 3
     assert float(_state(hass, entity_a).state) == 10
     assert float(_state(hass, entity_b).state) == 20
+    assert float(_state(hass, entity_c).state) == 30
 
 
 async def test_confirmed_node_removal_cleans_device_and_all_node_entities(
