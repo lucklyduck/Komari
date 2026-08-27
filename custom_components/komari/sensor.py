@@ -895,6 +895,7 @@ async def async_setup_entry(
             if (
                 series_key.node_uuid not in coordinator.data.nodes
                 or series_key.task_id not in selected_tasks
+                or series_key.task_id not in coordinator.data.ping_tasks
             ):
                 continue
             for description in PING_SENSOR_DESCRIPTIONS:

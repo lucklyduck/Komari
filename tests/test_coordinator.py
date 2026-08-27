@@ -293,6 +293,56 @@ async def test_coordinator_refreshes_due_inventory(hass: HomeAssistant) -> None:
     assert client.nodes_calls == 1
 
 
+async def test_node_requires_three_successful_inventory_misses(
+    hass: HomeAssistant,
+) -> None:
+    """A node remains visible until three authoritative list omissions."""
+    initial_nodes = _nodes("Node A", "Node B")
+    client = FakeKomariClient(_bootstrap(nodes=initial_nodes))
+    coordinator = _coordinator(hass, client)
+    await coordinator._async_update_data()
+    client.nodes = _nodes("Node A")
+
+    for expected_misses in (1, 2):
+        coordinator._last_inventory_attempt = -1_000_000
+        retained = await coordinator._async_update_data()
+        assert "node-2" in retained.nodes
+        assert coordinator.node_missing_counts == {"node-2": expected_misses}
+
+    coordinator._last_inventory_attempt = -1_000_000
+    removed = await coordinator._async_update_data()
+    assert set(removed.nodes) == {"node-1"}
+    assert coordinator.node_missing_counts == {}
+
+
+async def test_node_reappearance_resets_count_and_failure_does_not_increment(
+    hass: HomeAssistant,
+) -> None:
+    """Only a successful authoritative list can change absence counters."""
+    initial_nodes = _nodes("Node A", "Node B")
+    client = FakeKomariClient(_bootstrap(nodes=initial_nodes))
+    coordinator = _coordinator(hass, client)
+    await coordinator._async_update_data()
+
+    client.nodes = _nodes("Node A")
+    coordinator._last_inventory_attempt = -1_000_000
+    await coordinator._async_update_data()
+    assert coordinator.node_missing_counts == {"node-2": 1}
+
+    client.nodes_error = KomariConnectionError("sanitized")
+    coordinator._last_inventory_attempt = -1_000_000
+    failed = await coordinator._async_update_data()
+    assert "node-2" in failed.nodes
+    assert coordinator.node_missing_counts == {"node-2": 1}
+
+    client.nodes_error = None
+    client.nodes = initial_nodes
+    coordinator._last_inventory_attempt = -1_000_000
+    returned = await coordinator._async_update_data()
+    assert "node-2" in returned.nodes
+    assert coordinator.node_missing_counts == {}
+
+
 async def test_inventory_failure_keeps_old_nodes_and_new_status(
     hass: HomeAssistant,
     caplog: pytest.LogCaptureFixture,
@@ -407,6 +457,57 @@ async def test_multicadence_bootstrap_batches_selected_ping_stats(
     assert coordinator.branch_states[BRANCH_PING_TASKS].fetched_at is not None
     assert coordinator.branch_states[BRANCH_PING_STATS].fetched_at is not None
     assert coordinator.ping_stats_available is True
+
+
+async def test_ping_task_requires_three_successful_task_list_misses(
+    hass: HomeAssistant,
+) -> None:
+    """Task disappearance uses its own authoritative three-miss counter."""
+    capabilities = frozenset(
+        {METHOD_LATEST_STATUS, METHOD_PUBLIC_NODES, METHOD_PUBLIC_PING_TASKS}
+    )
+    client = FakeKomariClient(_bootstrap(capabilities=capabilities))
+    client.ping_tasks = parse_ping_tasks(
+        [
+            {"id": 101, "name": "Task one"},
+            {"id": 202, "name": "Task two"},
+        ]
+    )
+    coordinator = _coordinator(hass, client)
+    initial = await coordinator._async_update_data()
+    assert set(initial.ping_tasks) == {"101", "202"}
+
+    client.ping_tasks = parse_ping_tasks([{"id": 101, "name": "Task one"}])
+    for expected_misses in (1, 2):
+        coordinator._last_ping_tasks_attempt = -1_000_000
+        retained = await coordinator._async_update_data()
+        assert "202" in retained.ping_tasks
+        assert coordinator.ping_task_missing_counts == {"202": expected_misses}
+
+    coordinator._last_ping_tasks_attempt = -1_000_000
+    removed = await coordinator._async_update_data()
+    assert set(removed.ping_tasks) == {"101"}
+    assert coordinator.ping_task_missing_counts == {}
+
+
+async def test_ping_task_method_failure_retains_task_without_counting(
+    hass: HomeAssistant,
+) -> None:
+    """Method discovery failure is not an authoritative empty task list."""
+    capabilities = frozenset(
+        {METHOD_LATEST_STATUS, METHOD_PUBLIC_NODES, METHOD_PUBLIC_PING_TASKS}
+    )
+    client = FakeKomariClient(_bootstrap(capabilities=capabilities))
+    coordinator = _coordinator(hass, client)
+    initial = await coordinator._async_update_data()
+    client.ping_tasks_error = KomariMethodNotFoundError(-32601, "unavailable")
+    coordinator._last_ping_tasks_attempt = -1_000_000
+
+    retained = await coordinator._async_update_data()
+
+    assert retained.ping_tasks == initial.ping_tasks
+    assert coordinator.ping_task_missing_counts == {}
+    assert METHOD_PUBLIC_PING_TASKS not in retained.capabilities
 
 
 @pytest.mark.parametrize(

@@ -14,6 +14,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .api import select_ping_stats_method
 from .const import (
+    AUTHORITATIVE_MISSING_THRESHOLD,
     CAPABILITY_REFRESH_INTERVAL,
     DOMAIN,
     INVENTORY_REFRESH_INTERVAL,
@@ -158,6 +159,8 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
         self._branch_states: dict[str, KomariBranchState] = {
             branch: KomariBranchState() for branch in BRANCHES
         }
+        self._node_missing_counts: dict[str, int] = {}
+        self._ping_task_missing_counts: dict[str, int] = {}
 
     @property
     def branch_states(self) -> Mapping[str, KomariBranchState]:
@@ -169,6 +172,16 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
         """Return whether Ping data remains inside its two-failure TTL."""
         state = self._branch_states[BRANCH_PING_STATS]
         return state.fetched_at is not None and state.consecutive_failures < 2
+
+    @property
+    def node_missing_counts(self) -> Mapping[str, int]:
+        """Return current authoritative node-absence counters."""
+        return MappingProxyType(dict(self._node_missing_counts))
+
+    @property
+    def ping_task_missing_counts(self) -> Mapping[str, int]:
+        """Return current authoritative Ping-task absence counters."""
+        return MappingProxyType(dict(self._ping_task_missing_counts))
 
     @override
     async def _async_update_data(self) -> KomariSnapshot:
@@ -187,13 +200,18 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
         if self._inventory_is_due(now):
             self._last_inventory_attempt = now
             try:
-                nodes = await self.client.async_get_nodes(capabilities)
+                observed_nodes = await self.client.async_get_nodes(capabilities)
             except (KomariAuthenticationError, KomariPermissionError) as err:
                 self._record_failure(BRANCH_INVENTORY, err)
                 self._raise_auth_failed(err)
             except KomariError as err:
                 self._record_failure(BRANCH_INVENTORY, err)
             else:
+                nodes = _retain_until_confirmed_missing(
+                    nodes,
+                    observed_nodes,
+                    self._node_missing_counts,
+                )
                 self._record_success(BRANCH_INVENTORY)
 
         if self._ping_tasks_are_due(now):
@@ -310,12 +328,17 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
             self._raise_auth_failed(err)
         except KomariMethodNotFoundError as err:
             self._record_failure(BRANCH_PING_TASKS, err)
-            return MappingProxyType({}), capabilities - {METHOD_PUBLIC_PING_TASKS}
+            return prior, capabilities - {METHOD_PUBLIC_PING_TASKS}
         except KomariError as err:
             self._record_failure(BRANCH_PING_TASKS, err)
             return prior, capabilities
+        retained_tasks = _retain_until_confirmed_missing(
+            prior,
+            tasks,
+            self._ping_task_missing_counts,
+        )
         self._record_success(BRANCH_PING_TASKS)
-        return tasks, capabilities
+        return retained_tasks, capabilities
 
     async def _async_refresh_ping_stats(
         self,
@@ -466,6 +489,27 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
 def _is_due(last_attempt: float | None, now: float, interval: timedelta) -> bool:
     """Return whether a monotonic branch interval has elapsed."""
     return last_attempt is None or now - last_attempt >= interval.total_seconds()
+
+
+def _retain_until_confirmed_missing[T](
+    prior: Mapping[str, T],
+    observed: Mapping[str, T],
+    missing_counts: dict[str, int],
+) -> Mapping[str, T]:
+    """Retain absent authoritative items until three successful list misses."""
+    retained = dict(observed)
+    for identifier in observed:
+        missing_counts.pop(identifier, None)
+    for identifier, value in prior.items():
+        if identifier in observed:
+            continue
+        misses = missing_counts.get(identifier, 0) + 1
+        if misses >= AUTHORITATIVE_MISSING_THRESHOLD:
+            missing_counts.pop(identifier, None)
+            continue
+        missing_counts[identifier] = misses
+        retained[identifier] = value
+    return MappingProxyType(retained)
 
 
 def _error_category(error: Exception) -> str:
