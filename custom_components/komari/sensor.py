@@ -81,9 +81,7 @@ def _always_create(
 def _has_gpu(node: KomariNode, status: KomariNodeStatus | None) -> bool:
     """Return whether GPU metadata or a GPU value has been observed."""
     return bool(node.gpu_name) or (
-        status is not None
-        and status.gpu_usage is not None
-        and status.gpu_usage > 0
+        status is not None and status.gpu_usage is not None and status.gpu_usage > 0
     )
 
 

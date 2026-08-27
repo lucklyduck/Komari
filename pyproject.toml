@@ -23,7 +23,7 @@ addopts = [
     "--cov=custom_components.komari",
     "--cov-branch",
     "--cov-report=term-missing",
-    "--cov-fail-under=90",
+    "--cov-fail-under=95",
 ]
 asyncio_mode = "auto"
 testpaths = ["tests"]

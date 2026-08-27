@@ -16,9 +16,10 @@ from custom_components.komari.coordinator import (
     KomariSnapshot,
 )
 from custom_components.komari.device import (
-    node_identifier,
+    get_node_device,
     panel_identifier,
     register_devices,
+    remove_node_device,
 )
 from custom_components.komari.exceptions import (
     KomariAuthenticationError,
@@ -283,9 +284,7 @@ def test_register_panel_and_node_devices(hass: HomeAssistant) -> None:
         snapshot,
     )
     registry = dr.async_get(hass)
-    node = registry.async_get_device(
-        identifiers={node_identifier(entry.entry_id, "node-1")}
-    )
+    node = get_node_device(registry, entry.entry_id, "node-1")
 
     assert panel.entry_type is dr.DeviceEntryType.SERVICE
     assert panel.identifiers == {panel_identifier(entry.entry_id)}
@@ -293,7 +292,7 @@ def test_register_panel_and_node_devices(hass: HomeAssistant) -> None:
     assert node is not None
     assert node.via_device_id == panel.id
     assert node.name == "Node A"
-    assert node.config_entries == {entry.entry_id}
+    assert node.config_entry_id == entry.entry_id
 
 
 def test_same_node_uuid_is_isolated_between_entries(hass: HomeAssistant) -> None:
@@ -321,15 +320,15 @@ def test_same_node_uuid_is_isolated_between_entries(hass: HomeAssistant) -> None
         )
 
     registry = dr.async_get(hass)
-    nodes = [
-        registry.async_get_device(
-            identifiers={node_identifier(entry.entry_id, "node-1")}
-        )
-        for entry in entries
-    ]
+    nodes = [get_node_device(registry, entry.entry_id, "node-1") for entry in entries]
 
     assert nodes[0] is not None
     assert nodes[1] is not None
     assert nodes[0].id != nodes[1].id
     assert nodes[0].via_device_id == panels[0].id
     assert nodes[1].via_device_id == panels[1].id
+
+    assert remove_node_device(registry, entries[0].entry_id, "node-1") is True
+    assert get_node_device(registry, entries[0].entry_id, "node-1") is None
+    assert get_node_device(registry, entries[1].entry_id, "node-1") is not None
+    assert remove_node_device(registry, entries[0].entry_id, "node-1") is False

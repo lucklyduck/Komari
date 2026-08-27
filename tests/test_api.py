@@ -415,9 +415,7 @@ def test_gpu_absence_sentinels_are_normalized(gpu_name: object) -> None:
 
 def test_meaningful_gpu_name_is_preserved() -> None:
     """Real GPU model text remains available for capability discovery."""
-    node = parse_nodes([{"uuid": NODE_UUID, "gpu_name": " Example GPU "}])[
-        NODE_UUID
-    ]
+    node = parse_nodes([{"uuid": NODE_UUID, "gpu_name": " Example GPU "}])[NODE_UUID]
     assert node.gpu_name == "Example GPU"
 
 

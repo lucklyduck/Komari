@@ -6,10 +6,9 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
 from custom_components.komari.const import DOMAIN
 from custom_components.komari.coordinator import KomariSnapshot
-from custom_components.komari.device import node_identifier, panel_identifier
+from custom_components.komari.device import get_node_device, get_panel_device
 from custom_components.komari.models import (
     KomariBootstrapData,
     KomariNode,
@@ -357,12 +356,8 @@ async def test_device_ownership_and_entity_unique_ids(hass: HomeAssistant) -> No
     entry = await _setup_entry(hass, _bootstrap())
     device_registry = dr.async_get(hass)
     entity_registry = er.async_get(hass)
-    panel = device_registry.async_get_device(
-        identifiers={panel_identifier(entry.entry_id)}
-    )
-    node = device_registry.async_get_device(
-        identifiers={node_identifier(entry.entry_id, NODE_UUID)}
-    )
+    panel = get_panel_device(device_registry, entry.entry_id)
+    node = get_node_device(device_registry, entry.entry_id, NODE_UUID)
     assert panel is not None
     assert node is not None
     assert node.via_device_id == panel.id
@@ -636,8 +631,10 @@ async def test_new_node_is_added_once_without_reload(hass: HomeAssistant) -> Non
         "sensor",
         _unique_id(entry.entry_id, second_scope, "cpu_usage"),
     )
-    second_device = dr.async_get(hass).async_get_device(
-        identifiers={node_identifier(entry.entry_id, SECOND_NODE_UUID)}
+    second_device = get_node_device(
+        dr.async_get(hass),
+        entry.entry_id,
+        SECOND_NODE_UUID,
     )
     assert second_device is not None
     assert after_count > before_count
