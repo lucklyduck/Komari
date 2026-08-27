@@ -468,8 +468,10 @@ async def test_conditional_entities_appear_when_data_is_observed(
         )
 
     coordinator = entry.runtime_data.coordinator
+    observed = _status_payload()
+    observed["gpu"] = 1
     coordinator.async_set_updated_data(
-        _updated_snapshot(entry, statuses=parse_statuses([_status_payload()]))
+        _updated_snapshot(entry, statuses=parse_statuses([observed]))
     )
     await hass.async_block_till_done()
 

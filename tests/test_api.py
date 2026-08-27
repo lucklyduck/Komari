@@ -404,6 +404,24 @@ def test_status_values_and_zero_are_preserved() -> None:
 
 
 @pytest.mark.parametrize(
+    "gpu_name",
+    [None, "", "none", "null", "N/A", "n-a", "unknown", "-"],
+)
+def test_gpu_absence_sentinels_are_normalized(gpu_name: object) -> None:
+    """Common Komari no-GPU names do not become capabilities."""
+    node = parse_nodes([{"uuid": NODE_UUID, "gpu_name": gpu_name}])[NODE_UUID]
+    assert node.gpu_name is None
+
+
+def test_meaningful_gpu_name_is_preserved() -> None:
+    """Real GPU model text remains available for capability discovery."""
+    node = parse_nodes([{"uuid": NODE_UUID, "gpu_name": " Example GPU "}])[
+        NODE_UUID
+    ]
+    assert node.gpu_name == "Example GPU"
+
+
+@pytest.mark.parametrize(
     ("value", "expected"),
     [
         ("2026-08-26T00:00:00Z", datetime(2026, 8, 26, tzinfo=UTC)),

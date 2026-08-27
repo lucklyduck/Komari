@@ -12,6 +12,18 @@ from typing import Any
 
 from .exceptions import KomariProtocolError
 
+_EMPTY_GPU_NAMES = frozenset(
+    {
+        "-",
+        "n/a",
+        "n-a",
+        "na",
+        "none",
+        "null",
+        "unknown",
+    }
+)
+
 
 class TrafficLimitType(StrEnum):
     """Supported Komari traffic-limit calculation modes."""
@@ -186,7 +198,7 @@ def _parse_node(node_uuid: str, raw: Mapping[str, Any]) -> KomariNode:
         cpu_physical_cores=_optional_non_negative_int(raw.get("cpu_physical_cores")),
         os=_optional_str(raw.get("os")),
         kernel_version=_optional_str(raw.get("kernel_version")),
-        gpu_name=_optional_str(raw.get("gpu_name")),
+        gpu_name=_optional_gpu_name(raw.get("gpu_name")),
         region=_optional_str(raw.get("region")),
         memory_total=_optional_non_negative_int(raw.get("mem_total")),
         swap_total=_optional_non_negative_int(raw.get("swap_total")),
@@ -276,6 +288,14 @@ def _optional_str(value: object) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+def _optional_gpu_name(value: object) -> str | None:
+    """Return a meaningful GPU name, excluding common absence sentinels."""
+    name = _optional_str(value)
+    if name is None or name.casefold() in _EMPTY_GPU_NAMES:
+        return None
+    return name
 
 
 def _optional_bool(value: object) -> bool | None:

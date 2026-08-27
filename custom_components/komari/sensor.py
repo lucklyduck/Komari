@@ -19,7 +19,9 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 from homeassistant.core import callback
+from homeassistant.helpers import entity_registry as er
 
+from .const import DOMAIN
 from .entity import KomariNodeEntity, KomariPanelEntity
 
 if TYPE_CHECKING:
@@ -78,7 +80,11 @@ def _always_create(
 
 def _has_gpu(node: KomariNode, status: KomariNodeStatus | None) -> bool:
     """Return whether GPU metadata or a GPU value has been observed."""
-    return bool(node.gpu_name) or (status is not None and status.gpu_usage is not None)
+    return bool(node.gpu_name) or (
+        status is not None
+        and status.gpu_usage is not None
+        and status.gpu_usage > 0
+    )
 
 
 def _has_swap(node: KomariNode, status: KomariNodeStatus | None) -> bool:
@@ -405,6 +411,21 @@ async def async_setup_entry(
 ) -> None:
     """Set up panel sensors and dynamically discovered node sensors."""
     coordinator = entry.runtime_data.coordinator
+    registry = er.async_get(hass)
+
+    for node_uuid, node in coordinator.data.nodes.items():
+        status = coordinator.data.statuses.get(node_uuid)
+        optional_capabilities = {
+            "gpu_usage": _has_gpu(node, status),
+            "temperature": _has_temperature(node, status),
+        }
+        for key, supported in optional_capabilities.items():
+            if supported:
+                continue
+            unique_id = f"{entry.entry_id}:node:{node_uuid}:{key}"
+            if entity_id := registry.async_get_entity_id("sensor", DOMAIN, unique_id):
+                registry.async_remove(entity_id)
+
     async_add_entities(
         KomariPanelSensor(entry, description)
         for description in PANEL_SENSOR_DESCRIPTIONS
