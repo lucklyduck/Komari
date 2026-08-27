@@ -85,6 +85,12 @@ def test_invalid_option_types_fall_back_to_defaults() -> None:
     assert options.ping_task_ids == ()
     assert options.ping_stat_keys == ("latest", "loss")
 
+    selector_values = KomariOptions.from_mapping(
+        {CONF_SCAN_INTERVAL: 45.0, CONF_PING_INTERVAL: 600.0}
+    )
+    assert selector_values.scan_interval == 45
+    assert selector_values.ping_interval == 600
+
 
 async def test_migrate_p1_entry_preserves_data_options_and_identity(
     hass: HomeAssistant,

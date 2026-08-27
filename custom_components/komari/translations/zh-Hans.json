@@ -35,6 +35,69 @@
       "reauth_successful": "API 密钥已更新。"
     }
   },
+  "options": {
+    "step": {
+      "monitoring": {
+        "title": "监控周期",
+        "description": "这些轮询周期只作用于当前 Komari 面板。",
+        "data": {
+          "scan_interval": "核心状态周期",
+          "ping_interval": "Ping 统计周期"
+        }
+      },
+      "entities": {
+        "title": "可选节点实体",
+        "description": "选择需要公开的元数据实体组。",
+        "data": {
+          "enable_expiry_entities": "到期与续费实体",
+          "enable_traffic_entities": "流量限额实体"
+        }
+      },
+      "ping_tasks": {
+        "title": "Ping 任务",
+        "description": "最多选择 8 个任务；后续发现的新任务不会自动加入。",
+        "data": {
+          "ping_task_ids": "监控的 Ping 任务"
+        }
+      },
+      "ping_stats": {
+        "title": "Ping 统计项",
+        "description": "建议保留最新延迟和丢包率；高级统计会创建额外实体。",
+        "data": {
+          "ping_stat_keys": "统计项"
+        }
+      },
+      "confirm": {
+        "title": "确认 Komari 选项",
+        "description": "当前选择最多创建 {entity_count} 个 Ping 实体；每个面板上限为 {entity_limit} 个。",
+        "data": {
+          "confirm": "保存并重载当前面板"
+        }
+      }
+    },
+    "error": {
+      "too_many_ping_tasks": "最多只能选择 8 个 Ping 任务。",
+      "invalid_ping_task": "一个或多个 Ping 任务已经不可用。",
+      "ping_stats_required": "请至少选择一个 Ping 统计项。",
+      "invalid_ping_stat": "一个或多个 Ping 统计项无效。",
+      "too_many_ping_entities": "当前选择超过 256 个 Ping 实体的上限。",
+      "not_confirmed": "请确认预估结果后再保存。"
+    }
+  },
+  "selector": {
+    "ping_statistic": {
+      "options": {
+        "latest": "最新延迟",
+        "loss": "丢包率",
+        "min": "最小延迟",
+        "max": "最大延迟",
+        "avg": "平均延迟",
+        "p50": "P50 延迟",
+        "p99": "P99 延迟",
+        "stddev": "延迟标准差"
+      }
+    }
+  },
   "entity": {
     "binary_sensor": {
       "rpc_available": {

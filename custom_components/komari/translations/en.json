@@ -35,6 +35,69 @@
       "reauth_successful": "The API key was updated successfully."
     }
   },
+  "options": {
+    "step": {
+      "monitoring": {
+        "title": "Monitoring intervals",
+        "description": "Choose polling intervals for this Komari panel only.",
+        "data": {
+          "scan_interval": "Core status interval",
+          "ping_interval": "Ping statistics interval"
+        }
+      },
+      "entities": {
+        "title": "Optional node entities",
+        "description": "Choose which metadata-based entity families are exposed.",
+        "data": {
+          "enable_expiry_entities": "Expiry and renewal entities",
+          "enable_traffic_entities": "Traffic limit entities"
+        }
+      },
+      "ping_tasks": {
+        "title": "Ping tasks",
+        "description": "Select up to 8 tasks. Newly discovered tasks are not selected automatically.",
+        "data": {
+          "ping_task_ids": "Monitored Ping tasks"
+        }
+      },
+      "ping_stats": {
+        "title": "Ping statistics",
+        "description": "Latest latency and loss are the recommended defaults. Advanced statistics create additional entities.",
+        "data": {
+          "ping_stat_keys": "Statistics"
+        }
+      },
+      "confirm": {
+        "title": "Confirm Komari options",
+        "description": "This selection can create up to {entity_count} Ping entities. The per-panel limit is {entity_limit}.",
+        "data": {
+          "confirm": "Save and reload this panel"
+        }
+      }
+    },
+    "error": {
+      "too_many_ping_tasks": "Select no more than 8 Ping tasks.",
+      "invalid_ping_task": "One or more selected Ping tasks are no longer available.",
+      "ping_stats_required": "Select at least one Ping statistic.",
+      "invalid_ping_stat": "One or more Ping statistics are invalid.",
+      "too_many_ping_entities": "This selection exceeds the 256 Ping entity limit.",
+      "not_confirmed": "Confirm the preview before saving."
+    }
+  },
+  "selector": {
+    "ping_statistic": {
+      "options": {
+        "latest": "Latest latency",
+        "loss": "Packet loss",
+        "min": "Minimum latency",
+        "max": "Maximum latency",
+        "avg": "Average latency",
+        "p50": "P50 latency",
+        "p99": "P99 latency",
+        "stddev": "Latency standard deviation"
+      }
+    }
+  },
   "entity": {
     "binary_sensor": {
       "rpc_available": {

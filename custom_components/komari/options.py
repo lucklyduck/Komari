@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from typing import TYPE_CHECKING
 
 from .const import (
@@ -101,9 +102,12 @@ def _bounded_int(
     maximum: int,
 ) -> int:
     """Return an in-range integer without coercing booleans or strings."""
-    if isinstance(value, bool) or not isinstance(value, int):
+    if isinstance(value, bool) or not isinstance(value, int | float):
         return default
-    return min(max(value, minimum), maximum)
+    numeric = float(value)
+    if not isfinite(numeric) or not numeric.is_integer():
+        return default
+    return min(max(int(numeric), minimum), maximum)
 
 
 def _strict_bool(value: object, default: bool) -> bool:
