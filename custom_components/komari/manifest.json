@@ -8,5 +8,5 @@
   "iot_class": "cloud_polling",
   "name": "Komari",
   "requirements": [],
-  "version": "0.1.0-alpha.1"
+  "version": "0.2.0-alpha.1"
 }
