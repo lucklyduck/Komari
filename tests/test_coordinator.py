@@ -728,6 +728,73 @@ async def test_ping_failure_isolated_with_two_poll_ttl_and_recovery(
     assert "refresh recovered" in caplog.text
 
 
+async def test_failure_transition_logging_is_low_noise_and_entry_scoped(
+    hass: HomeAssistant,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Each entry warns once, then debugs persistence and logs one recovery."""
+    capabilities = frozenset(
+        {
+            METHOD_LATEST_STATUS,
+            METHOD_PUBLIC_NODES,
+            METHOD_PUBLIC_PING_TASKS,
+            METHOD_PING_METRIC_STATS,
+        }
+    )
+    clients = [
+        FakeKomariClient(_bootstrap(panel_name=name, capabilities=capabilities))
+        for name in ("Panel A", "Panel B")
+    ]
+    coordinators = [
+        _coordinator(
+            hass,
+            client,
+            title=f"Entry {index}",
+            options={CONF_PING_TASK_IDS: ["101"]},
+        )
+        for index, client in enumerate(clients, start=1)
+    ]
+    for coordinator in coordinators:
+        await coordinator._async_update_data()
+    for index, client in enumerate(clients, start=1):
+        client.ping_stats_error = KomariConnectionError(f"secret-{index}")
+
+    with caplog.at_level(logging.DEBUG):
+        for coordinator in coordinators:
+            coordinator._last_ping_stats_attempt = -1_000_000
+            await coordinator._async_update_data()
+        coordinators[0]._last_ping_stats_attempt = -1_000_000
+        await coordinators[0]._async_update_data()
+        clients[0].ping_stats_error = None
+        coordinators[0]._last_ping_stats_attempt = -1_000_000
+        await coordinators[0]._async_update_data()
+
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and "ping_stats refresh failed" in record.getMessage()
+    ]
+    continued = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.DEBUG
+        and "ping_stats refresh still failing" in record.getMessage()
+    ]
+    recovered = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.INFO
+        and "ping_stats refresh recovered" in record.getMessage()
+    ]
+    assert len(warnings) == 2
+    assert len(continued) == 1
+    assert len(recovered) == 1
+    assert all("KomariConnectionError" in record.getMessage() for record in warnings)
+    assert "secret-1" not in caplog.text
+    assert "secret-2" not in caplog.text
+
+
 @pytest.mark.parametrize(
     ("branch", "method"),
     [

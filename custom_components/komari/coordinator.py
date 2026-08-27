@@ -463,15 +463,27 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
         """Record only a safe error category and failure count."""
         previous = self._branch_states[branch]
         category = _error_category(error)
+        error_type = type(error).__name__
         if previous.consecutive_failures:
-            _LOGGER.debug("Komari %s refresh still failing (%s)", branch, category)
+            _LOGGER.debug(
+                "Komari %s refresh still failing (%s, %s)",
+                branch,
+                category,
+                error_type,
+            )
         elif branch == BRANCH_INVENTORY:
             _LOGGER.warning(
-                "Komari inventory refresh failed (%s); keeping prior inventory",
+                "Komari inventory refresh failed (%s, %s); keeping prior inventory",
                 category,
+                error_type,
             )
         else:
-            _LOGGER.warning("Komari %s refresh failed (%s)", branch, category)
+            _LOGGER.warning(
+                "Komari %s refresh failed (%s, %s)",
+                branch,
+                category,
+                error_type,
+            )
         self._branch_states[branch] = KomariBranchState(
             fetched_at=previous.fetched_at,
             error_category=category,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -13,6 +14,7 @@ from custom_components.komari.binary_sensor import (
     EXPIRY_BINARY_SENSOR_DESCRIPTIONS,
 )
 from custom_components.komari.const import (
+    CONF_API_KEY,
     CONF_ENABLE_EXPIRY_ENTITIES,
     CONF_ENABLE_TRAFFIC_ENTITIES,
     CONF_PING_STAT_KEYS,
@@ -28,6 +30,11 @@ from custom_components.komari.coordinator import (
     KomariSnapshot,
 )
 from custom_components.komari.device import get_node_device, get_panel_device
+from custom_components.komari.diagnostics import (
+    async_get_config_entry_diagnostics,
+    async_get_device_diagnostics,
+    redact_diagnostics,
+)
 from custom_components.komari.models import (
     KomariBootstrapData,
     KomariNode,
@@ -1890,6 +1897,132 @@ async def test_manual_device_removal_uses_latest_successful_raw_inventory(
 
     assert not await async_remove_config_entry_device(hass, entry, first)
     assert await async_remove_config_entry_device(hass, entry, second)
+
+
+async def test_config_and_device_diagnostics_are_structural_and_redacted(
+    hass: HomeAssistant,
+) -> None:
+    """Diagnostics expose counts and field presence without monitored identity."""
+    node = _node_payload(name="Sensitive node")
+    node.update(
+        {
+            "expired_at": "2027-01-01T00:00:00Z",
+            "traffic_limit": 1000,
+            "traffic_limit_type": "sum",
+        }
+    )
+    entry = await _setup_ping_entry(
+        hass,
+        task_payloads=[
+            {
+                "id": 101,
+                "name": "Sensitive target 203.0.113.9",
+                "target": "https://203.0.113.9/private",
+                "clients": [NODE_UUID],
+            }
+        ],
+        stats_payloads=[
+            {"entity_id": NODE_UUID, "task_id": 101, "latest": 12, "loss": 0}
+        ],
+        selected_task_ids=["101"],
+        selected_stats=["latest", "loss"],
+        node_payloads=[node],
+        title="Sensitive panel",
+        url="https://sensitive-panel.example.test",
+    )
+    hass.config_entries.async_update_entry(
+        entry,
+        data={
+            **entry.data,
+            CONF_API_KEY: "diagnostics-secret-key",
+        },
+    )
+
+    entry_diagnostics = await async_get_config_entry_diagnostics(hass, entry)
+    assert entry_diagnostics["versions"] == {
+        "integration": "0.1.0-alpha.1",
+        "komari": "1.2.3",
+        "rpc": "2.0",
+    }
+    assert entry_diagnostics["capabilities"]["ping_tasks"] is True
+    assert entry_diagnostics["capabilities"]["ping_metric_stats"] is True
+    assert entry_diagnostics["nodes"] == {
+        "visible": 1,
+        "online": 1,
+        "offline": 0,
+        "status_missing": 0,
+    }
+    assert entry_diagnostics["options"]["selected_ping_task_count"] == 1
+    assert entry_diagnostics["options"]["selected_ping_stat_count"] == 2
+    assert entry_diagnostics["entities"] == {
+        "expiry": 5,
+        "traffic": 4,
+        "ping": 2,
+    }
+    assert entry_diagnostics["traffic_calculation_source"] == "agent_counters"
+
+    node_device = get_node_device(dr.async_get(hass), entry.entry_id, NODE_UUID)
+    panel_device = get_panel_device(dr.async_get(hass), entry.entry_id)
+    assert node_device is not None
+    assert panel_device is not None
+    node_diagnostics = await async_get_device_diagnostics(hass, entry, node_device)
+    panel_diagnostics = await async_get_device_diagnostics(hass, entry, panel_device)
+    assert node_diagnostics["device_type"] == "node"
+    assert len(node_diagnostics["node_identifier"]) == 16
+    assert node_diagnostics["node_identifier"] != NODE_UUID
+    assert node_diagnostics["inventory_present"] is True
+    assert node_diagnostics["status_present"] is True
+    assert all(node_diagnostics["inventory_field_presence"].values()) is False
+    assert all(
+        isinstance(value, bool)
+        for value in node_diagnostics["inventory_field_presence"].values()
+    )
+    assert all(
+        isinstance(value, bool)
+        for value in node_diagnostics["status_field_presence"].values()
+    )
+    assert panel_diagnostics["device_type"] == "panel"
+
+    serialized = json.dumps(
+        {
+            "entry": entry_diagnostics,
+            "node": node_diagnostics,
+            "panel": panel_diagnostics,
+        }
+    )
+    for sensitive in (
+        "diagnostics-secret-key",
+        "sensitive-panel.example.test",
+        "Sensitive panel",
+        "Sensitive node",
+        "Sensitive target",
+        "203.0.113.9",
+        NODE_UUID,
+    ):
+        assert sensitive not in serialized
+
+
+def test_nested_diagnostics_defense_redacts_sensitive_keys() -> None:
+    """Defense-in-depth redaction traverses nested mappings and arrays."""
+    redacted = redact_diagnostics(
+        {
+            "safe": True,
+            "nested": {
+                "Authorization": "Bearer nested-secret",
+                "items": [
+                    {
+                        "uuid": NODE_UUID,
+                        "target": "https://203.0.113.9/private",
+                    }
+                ],
+            },
+        }
+    )
+    serialized = json.dumps(redacted)
+    assert redacted["safe"] is True
+    assert "nested-secret" not in serialized
+    assert NODE_UUID not in serialized
+    assert "203.0.113.9" not in serialized
 
 
 def test_description_defaults_match_the_p1_contract() -> None:
