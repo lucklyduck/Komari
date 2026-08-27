@@ -95,6 +95,7 @@
     "error": {
       "too_many_ping_tasks": "最多只能选择 8 个 Ping 任务。",
       "invalid_ping_task": "一个或多个 Ping 任务已经不可用。",
+      "ping_batch_unsupported": "该面板无法用单次请求获取当前节点与任务组合，请只选择一个任务。",
       "ping_stats_required": "请至少选择一个 Ping 统计项。",
       "invalid_ping_stat": "一个或多个 Ping 统计项无效。",
       "too_many_ping_entities": "当前选择超过 256 个 Ping 实体的上限。",

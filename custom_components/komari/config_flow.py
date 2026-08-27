@@ -28,7 +28,7 @@ from homeassistant.helpers.selector import (
 )
 from yarl import URL
 
-from .api import KomariApiClient
+from .api import KomariApiClient, select_ping_stats_method
 from .const import (
     API_PATH,
     CONF_API_KEY,
@@ -48,6 +48,7 @@ from .const import (
     MIN_PING_INTERVAL,
     MIN_SCAN_INTERVAL,
     PING_STAT_KEYS,
+    PING_STATS_METHODS,
 )
 from .exceptions import (
     KomariAuthenticationError,
@@ -368,6 +369,7 @@ class KomariOptionsFlow(OptionsFlowWithReload):
         return bool(
             snapshot is not None
             and METHOD_PUBLIC_PING_TASKS in snapshot.capabilities
+            and bool(snapshot.capabilities & PING_STATS_METHODS)
             and snapshot.ping_tasks
         )
 
@@ -470,10 +472,20 @@ class KomariOptionsFlow(OptionsFlowWithReload):
             elif any(task_id not in tasks for task_id in selected):
                 errors["base"] = "invalid_ping_task"
             else:
-                self._pending[CONF_PING_TASK_IDS] = list(selected)
-                if not selected:
-                    return await self.async_step_confirm()
-                return await self.async_step_ping_stats()
+                try:
+                    if selected and snapshot is not None:
+                        select_ping_stats_method(
+                            snapshot.capabilities,
+                            tuple(snapshot.nodes),
+                            selected,
+                        )
+                except KomariUnsupportedError:
+                    errors["base"] = "ping_batch_unsupported"
+                else:
+                    self._pending[CONF_PING_TASK_IDS] = list(selected)
+                    if not selected:
+                        return await self.async_step_confirm()
+                    return await self.async_step_ping_stats()
 
         task_options = [
             SelectOptionDict(value=task.task_id, label=task.name)

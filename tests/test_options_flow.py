@@ -15,7 +15,9 @@ from custom_components.komari.const import (
     CONF_SCAN_INTERVAL,
     DOMAIN,
     METHOD_LATEST_STATUS,
+    METHOD_PING_METRIC_STATS,
     METHOD_PUBLIC_NODES,
+    METHOD_PUBLIC_PING_RECORDS,
     METHOD_PUBLIC_PING_TASKS,
 )
 from custom_components.komari.coordinator import KomariSnapshot
@@ -35,7 +37,12 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
 
-def _snapshot(*, node_count: int = 2, task_count: int = 2) -> KomariSnapshot:
+def _snapshot(
+    *,
+    node_count: int = 2,
+    task_count: int = 2,
+    ping_stats_capability: bool = True,
+) -> KomariSnapshot:
     """Create a loaded snapshot with sanitized visible nodes and Ping tasks."""
     nodes = parse_nodes(
         [
@@ -58,6 +65,13 @@ def _snapshot(*, node_count: int = 2, task_count: int = 2) -> KomariSnapshot:
             for index in range(task_count)
         ]
     )
+    capabilities = {
+        METHOD_LATEST_STATUS,
+        METHOD_PUBLIC_NODES,
+        METHOD_PUBLIC_PING_TASKS,
+    }
+    if ping_stats_capability:
+        capabilities.add(METHOD_PING_METRIC_STATS)
     return KomariSnapshot(
         panel=KomariPanelInfo(
             name="Fixture panel",
@@ -68,9 +82,7 @@ def _snapshot(*, node_count: int = 2, task_count: int = 2) -> KomariSnapshot:
         ),
         nodes=nodes,
         statuses=statuses,
-        capabilities=frozenset(
-            {METHOD_LATEST_STATUS, METHOD_PUBLIC_NODES, METHOD_PUBLIC_PING_TASKS}
-        ),
+        capabilities=frozenset(capabilities),
         ping_tasks=tasks,
     )
 
@@ -229,6 +241,30 @@ async def test_no_ping_capability_hides_both_ping_steps(
     assert result["step_id"] == "confirm"
 
 
+async def test_task_discovery_without_stats_capability_hides_ping_steps(
+    hass: HomeAssistant,
+) -> None:
+    """A task list alone cannot offer a Ping configuration that never updates."""
+    entry = _entry(hass, _snapshot(ping_stats_capability=False))
+    result = await _start(hass, entry)
+    result = await _configure(
+        hass,
+        result,
+        {CONF_SCAN_INTERVAL: 30, CONF_PING_INTERVAL: 300},
+    )
+    result = await _configure(
+        hass,
+        result,
+        {
+            CONF_ENABLE_EXPIRY_ENTITIES: True,
+            CONF_ENABLE_TRAFFIC_ENTITIES: True,
+        },
+    )
+
+    assert result["step_id"] == "confirm"
+    assert result["description_placeholders"]["entity_count"] == "0"
+
+
 async def test_task_and_stat_validation_errors_stay_on_current_step(
     hass: HomeAssistant,
 ) -> None:
@@ -252,6 +288,37 @@ async def test_task_and_stat_validation_errors_stay_on_current_step(
         {CONF_PING_STAT_KEYS: []},
     )
     assert result["errors"] == {"base": "ping_stats_required"}
+
+
+async def test_public_records_only_rejects_multi_task_fanout(
+    hass: HomeAssistant,
+) -> None:
+    """Options prevents a selection that cannot be fetched in one request."""
+    snapshot = _snapshot()
+    snapshot = KomariSnapshot(
+        panel=snapshot.panel,
+        nodes=snapshot.nodes,
+        statuses=snapshot.statuses,
+        capabilities=frozenset(
+            {
+                METHOD_LATEST_STATUS,
+                METHOD_PUBLIC_NODES,
+                METHOD_PUBLIC_PING_TASKS,
+                METHOD_PUBLIC_PING_RECORDS,
+            }
+        ),
+        ping_tasks=snapshot.ping_tasks,
+    )
+    entry = _entry(hass, snapshot)
+    result = await _to_ping_tasks(hass, await _start(hass, entry))
+    result = await _configure(
+        hass,
+        result,
+        {CONF_PING_TASK_IDS: ["0", "1"]},
+    )
+
+    assert result["step_id"] == "ping_tasks"
+    assert result["errors"] == {"base": "ping_batch_unsupported"}
 
 
 async def test_entity_estimate_over_limit_blocks_save(hass: HomeAssistant) -> None:

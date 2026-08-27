@@ -11,9 +11,11 @@ from custom_components.komari.const import (
     CONF_PING_INTERVAL,
     CONF_PING_TASK_IDS,
     DEFAULT_SCAN_INTERVAL,
+    METHOD_COMMON_RECORDS,
     METHOD_LATEST_STATUS,
     METHOD_PING_METRIC_STATS,
     METHOD_PUBLIC_NODES,
+    METHOD_PUBLIC_PING_RECORDS,
     METHOD_PUBLIC_PING_TASKS,
 )
 from custom_components.komari.coordinator import (
@@ -210,7 +212,11 @@ class FakeKomariClient:
         max_points: int,
     ) -> Mapping[KomariPingSeriesKey, KomariPingStats]:
         """Return or fail one batch Ping statistics request."""
-        assert METHOD_PING_METRIC_STATS in capabilities
+        assert capabilities & {
+            METHOD_PING_METRIC_STATS,
+            METHOD_PUBLIC_PING_RECORDS,
+            METHOD_COMMON_RECORDS,
+        }
         self.ping_stats_calls += 1
         self.last_ping_request = {
             "node_uuids": node_uuids,
@@ -400,6 +406,159 @@ async def test_multicadence_bootstrap_batches_selected_ping_stats(
     assert second.statuses == client.statuses
     assert coordinator.branch_states[BRANCH_PING_TASKS].fetched_at is not None
     assert coordinator.branch_states[BRANCH_PING_STATS].fetched_at is not None
+    assert coordinator.ping_stats_available is True
+
+
+@pytest.mark.parametrize(
+    ("nodes", "task_ids", "fallback_method"),
+    [
+        (_nodes("Node A", "Node B"), ["101"], METHOD_PUBLIC_PING_RECORDS),
+        (
+            _nodes("Node A", "Node B"),
+            ["101", "202"],
+            METHOD_COMMON_RECORDS,
+        ),
+    ],
+)
+async def test_coordinator_loads_capability_confirmed_ping_fallbacks(
+    hass: HomeAssistant,
+    nodes: Mapping[str, KomariNode],
+    task_ids: list[str],
+    fallback_method: str,
+) -> None:
+    """Selected Ping data loads through one compatible records capability."""
+    capabilities = frozenset(
+        {
+            METHOD_LATEST_STATUS,
+            METHOD_PUBLIC_NODES,
+            METHOD_PUBLIC_PING_TASKS,
+            fallback_method,
+        }
+    )
+    client = FakeKomariClient(_bootstrap(nodes=nodes, capabilities=capabilities))
+    coordinator = _coordinator(
+        hass,
+        client,
+        options={CONF_PING_TASK_IDS: task_ids},
+    )
+
+    snapshot = await coordinator._async_update_data()
+
+    assert client.ping_stats_calls == 1
+    assert len(snapshot.ping_stats) == 1
+    assert coordinator.ping_stats_available is True
+    assert snapshot.branch_states[BRANCH_PING_STATS].error_category is None
+
+
+async def test_coordinator_rejects_ping_fallback_that_requires_fanout(
+    hass: HomeAssistant,
+) -> None:
+    """Public records alone does not trigger per-node or per-task requests."""
+    nodes = _nodes("Node A", "Node B")
+    capabilities = frozenset(
+        {
+            METHOD_LATEST_STATUS,
+            METHOD_PUBLIC_NODES,
+            METHOD_PUBLIC_PING_TASKS,
+            METHOD_PUBLIC_PING_RECORDS,
+        }
+    )
+    client = FakeKomariClient(_bootstrap(nodes=nodes, capabilities=capabilities))
+    coordinator = _coordinator(
+        hass,
+        client,
+        options={CONF_PING_TASK_IDS: ["101", "202"]},
+    )
+
+    snapshot = await coordinator._async_update_data()
+
+    assert client.ping_stats_calls == 0
+    assert snapshot.ping_stats == {}
+    assert coordinator.ping_stats_available is False
+    assert snapshot.branch_states[BRANCH_PING_STATS].error_category == "unsupported"
+
+
+async def test_coordinator_filters_unselected_and_invisible_ping_series(
+    hass: HomeAssistant,
+) -> None:
+    """The coordinator enforces visible-node and selected-task intersections."""
+    capabilities = frozenset(
+        {
+            METHOD_LATEST_STATUS,
+            METHOD_PUBLIC_NODES,
+            METHOD_PUBLIC_PING_TASKS,
+            METHOD_PING_METRIC_STATS,
+        }
+    )
+    client = FakeKomariClient(_bootstrap(capabilities=capabilities))
+    client.ping_stats = parse_ping_metric_stats(
+        {
+            "stats": [
+                {
+                    "entity_id": "node-1",
+                    "task_id": 101,
+                    "latest": 10,
+                    "loss": 0,
+                },
+                {
+                    "entity_id": "hidden-node",
+                    "task_id": 101,
+                    "latest": 20,
+                    "loss": 0,
+                },
+                {
+                    "entity_id": "node-1",
+                    "task_id": 999,
+                    "latest": 30,
+                    "loss": 0,
+                },
+            ]
+        }
+    )
+    coordinator = _coordinator(
+        hass,
+        client,
+        options={CONF_PING_TASK_IDS: ["101"]},
+    )
+
+    snapshot = await coordinator._async_update_data()
+
+    assert tuple(snapshot.ping_stats) == (
+        KomariPingSeriesKey(node_uuid="node-1", task_id="101"),
+    )
+
+
+async def test_ping_method_not_found_switches_capability_on_next_poll(
+    hass: HomeAssistant,
+) -> None:
+    """Only the failed preferred capability is removed before later fallback."""
+    capabilities = frozenset(
+        {
+            METHOD_LATEST_STATUS,
+            METHOD_PUBLIC_NODES,
+            METHOD_PUBLIC_PING_TASKS,
+            METHOD_PING_METRIC_STATS,
+            METHOD_PUBLIC_PING_RECORDS,
+        }
+    )
+    client = FakeKomariClient(_bootstrap(capabilities=capabilities))
+    client.ping_stats_error = KomariMethodNotFoundError(-32601, "unavailable")
+    coordinator = _coordinator(
+        hass,
+        client,
+        options={CONF_PING_TASK_IDS: ["101"]},
+    )
+
+    first = await coordinator._async_update_data()
+    assert METHOD_PING_METRIC_STATS not in first.capabilities
+    assert METHOD_PUBLIC_PING_RECORDS in first.capabilities
+
+    client.ping_stats_error = None
+    coordinator._last_ping_stats_attempt = -1_000_000
+    second = await coordinator._async_update_data()
+
+    assert client.ping_stats_calls == 2
+    assert second.ping_stats == client.ping_stats
     assert coordinator.ping_stats_available is True
 
 

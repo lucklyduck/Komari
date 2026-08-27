@@ -65,4 +65,12 @@ METHOD_PING_METRIC_STATS = "public:getPingMetricStats"
 METHOD_PUBLIC_PING_RECORDS = "public:getPingRecords"
 METHOD_COMMON_RECORDS = "common:getRecords"
 
+PING_STATS_METHODS = frozenset(
+    {
+        METHOD_PING_METRIC_STATS,
+        METHOD_PUBLIC_PING_RECORDS,
+        METHOD_COMMON_RECORDS,
+    }
+)
+
 REQUIRED_METHODS = frozenset({METHOD_LATEST_STATUS})

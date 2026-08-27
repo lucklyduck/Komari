@@ -95,6 +95,7 @@
     "error": {
       "too_many_ping_tasks": "Select no more than 8 Ping tasks.",
       "invalid_ping_task": "One or more selected Ping tasks are no longer available.",
+      "ping_batch_unsupported": "This panel cannot fetch the selected node and task matrix in one request. Select one task.",
       "ping_stats_required": "Select at least one Ping statistic.",
       "invalid_ping_stat": "One or more Ping statistics are invalid.",
       "too_many_ping_entities": "This selection exceeds the 256 Ping entity limit.",

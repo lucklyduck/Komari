@@ -12,11 +12,11 @@ from typing import TYPE_CHECKING, Never, override
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from .api import select_ping_stats_method
 from .const import (
     CAPABILITY_REFRESH_INTERVAL,
     DOMAIN,
     INVENTORY_REFRESH_INTERVAL,
-    METHOD_PING_METRIC_STATS,
     METHOD_PUBLIC_PING_TASKS,
     PING_QUERY_HOURS,
     PING_QUERY_MAX_POINTS,
@@ -265,7 +265,7 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
                 ping_tasks,
                 capabilities,
             )
-        if self.options.ping_task_ids and METHOD_PING_METRIC_STATS in capabilities:
+        if self.options.ping_task_ids:
             self._last_ping_stats_attempt = now
             ping_stats, capabilities = await self._async_refresh_ping_stats(
                 ping_stats,
@@ -327,7 +327,17 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
         frozenset[str],
     ]:
         """Refresh selected Ping statistics in one batch request."""
-        if METHOD_PING_METRIC_STATS not in capabilities:
+        if not nodes:
+            self._record_success(BRANCH_PING_STATS)
+            return MappingProxyType({}), capabilities
+        try:
+            selected_method = select_ping_stats_method(
+                capabilities,
+                tuple(nodes),
+                self.options.ping_task_ids,
+            )
+        except KomariUnsupportedError as err:
+            self._record_failure(BRANCH_PING_STATS, err)
             return prior, capabilities
         try:
             stats = await self.client.async_get_ping_stats(
@@ -342,12 +352,21 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
             self._raise_auth_failed(err)
         except KomariMethodNotFoundError as err:
             self._record_failure(BRANCH_PING_STATS, err)
-            return prior, capabilities - {METHOD_PING_METRIC_STATS}
+            return prior, capabilities - {selected_method}
         except KomariError as err:
             self._record_failure(BRANCH_PING_STATS, err)
             return prior, capabilities
+        visible_nodes = frozenset(nodes)
+        selected_tasks = frozenset(self.options.ping_task_ids)
+        filtered_stats = MappingProxyType(
+            {
+                key: value
+                for key, value in stats.items()
+                if key.node_uuid in visible_nodes and key.task_id in selected_tasks
+            }
+        )
         self._record_success(BRANCH_PING_STATS)
-        return stats, capabilities
+        return filtered_stats, capabilities
 
     def _publish_snapshot(
         self,
