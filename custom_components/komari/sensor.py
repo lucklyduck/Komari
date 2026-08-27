@@ -96,7 +96,14 @@ def _has_swap(node: KomariNode, status: KomariNodeStatus | None) -> bool:
 
 def _has_temperature(node: KomariNode, status: KomariNodeStatus | None) -> bool:
     """Return whether a valid temperature has been observed."""
-    return status is not None and status.temperature is not None
+    return status is not None and _valid_temperature(status.temperature) is not None
+
+
+def _valid_temperature(value: float | None) -> float | None:
+    """Return a physically plausible Celsius value reported by Komari."""
+    if value is None or value <= 0 or value > 200:
+        return None
+    return value
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -284,7 +291,7 @@ NODE_SENSOR_DESCRIPTIONS: tuple[KomariNodeSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=1,
         create_fn=_has_temperature,
-        value_fn=lambda status: status.temperature,
+        value_fn=lambda status: _valid_temperature(status.temperature),
     ),
     KomariNodeSensorEntityDescription(
         key="network_in",

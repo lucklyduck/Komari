@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from custom_components.komari.const import DOMAIN
 from custom_components.komari.coordinator import KomariSnapshot
 from custom_components.komari.device import node_identifier, panel_identifier
@@ -483,6 +485,116 @@ async def test_conditional_entities_appear_when_data_is_observed(
                 _unique_id(entry.entry_id, node_scope, key),
             )
             is not None
+        )
+
+
+async def test_zero_gpu_and_invalid_temperatures_do_not_create_entities(
+    hass: HomeAssistant,
+) -> None:
+    """Zero/sentinel telemetry from unsupported hardware stays absent."""
+    node = _node_payload(optional_hardware=False)
+    node["gpu_name"] = "unknown"
+    status = _status_payload(optional_metrics=False)
+    status.update({"gpu": 0, "temp": 0})
+    entry = await _setup_entry(
+        hass,
+        _bootstrap(node_payloads=[node], status_payloads=[status]),
+    )
+    registry = er.async_get(hass)
+    for key in ("gpu_usage", "temperature"):
+        assert (
+            registry.async_get_entity_id(
+                "sensor",
+                DOMAIN,
+                _unique_id(entry.entry_id, f"node:{NODE_UUID}", key),
+            )
+            is None
+        )
+
+
+@pytest.mark.parametrize("temperature", [-1, 0, 200.1, 201])
+async def test_invalid_temperature_boundaries_do_not_create_entity(
+    hass: HomeAssistant,
+    temperature: float,
+) -> None:
+    """Only values inside the locked 0 < temperature <= 200 range qualify."""
+    status = _status_payload(optional_metrics=False)
+    status["temp"] = temperature
+    entry = await _setup_entry(
+        hass,
+        _bootstrap(
+            node_payloads=[_node_payload(optional_hardware=False)],
+            status_payloads=[status],
+        ),
+    )
+    assert (
+        er.async_get(hass).async_get_entity_id(
+            "sensor",
+            DOMAIN,
+            _unique_id(entry.entry_id, f"node:{NODE_UUID}", "temperature"),
+        )
+        is None
+    )
+
+
+async def test_temperature_upper_boundary_is_valid(hass: HomeAssistant) -> None:
+    """The inclusive 200 degree upper boundary remains representable."""
+    status = _status_payload(optional_metrics=False)
+    status["temp"] = 200
+    entry = await _setup_entry(
+        hass,
+        _bootstrap(
+            node_payloads=[_node_payload(optional_hardware=False)],
+            status_payloads=[status],
+        ),
+    )
+    entity_id = _entity_id(
+        hass,
+        "sensor",
+        _unique_id(entry.entry_id, f"node:{NODE_UUID}", "temperature"),
+    )
+    assert _state(hass, entity_id).state == "200.0"
+
+
+async def test_upgrade_removes_stale_optional_hardware_registry_entries(
+    hass: HomeAssistant,
+) -> None:
+    """P1 false-positive GPU and temperature entries are removed on setup."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Komari Lab",
+        data={CONF_URL: "https://example.test", CONF_VERIFY_SSL: True},
+    )
+    entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    for key in ("gpu_usage", "temperature"):
+        registry.async_get_or_create(
+            "sensor",
+            DOMAIN,
+            _unique_id(entry.entry_id, f"node:{NODE_UUID}", key),
+            config_entry=entry,
+        )
+
+    node = _node_payload(optional_hardware=False)
+    node["gpu_name"] = "null"
+    status = _status_payload(optional_metrics=False)
+    status.update({"gpu": 0, "temp": 0})
+    bootstrap = _bootstrap(node_payloads=[node], status_payloads=[status])
+    with patch(
+        "custom_components.komari.api.KomariApiClient.async_get_bootstrap",
+        new=AsyncMock(return_value=bootstrap),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    for key in ("gpu_usage", "temperature"):
+        assert (
+            registry.async_get_entity_id(
+                "sensor",
+                DOMAIN,
+                _unique_id(entry.entry_id, f"node:{NODE_UUID}", key),
+            )
+            is None
         )
 
 
