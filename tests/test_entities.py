@@ -10,7 +10,11 @@ import pytest
 from custom_components.komari.binary_sensor import (
     EXPIRY_BINARY_SENSOR_DESCRIPTIONS,
 )
-from custom_components.komari.const import CONF_ENABLE_EXPIRY_ENTITIES, DOMAIN
+from custom_components.komari.const import (
+    CONF_ENABLE_EXPIRY_ENTITIES,
+    CONF_ENABLE_TRAFFIC_ENTITIES,
+    DOMAIN,
+)
 from custom_components.komari.coordinator import KomariSnapshot
 from custom_components.komari.device import get_node_device, get_panel_device
 from custom_components.komari.models import (
@@ -18,6 +22,7 @@ from custom_components.komari.models import (
     KomariNode,
     KomariNodeStatus,
     KomariPanelInfo,
+    TrafficLimitType,
     parse_nodes,
     parse_statuses,
 )
@@ -25,6 +30,9 @@ from custom_components.komari.sensor import (
     EXPIRY_SENSOR_DESCRIPTIONS,
     NODE_SENSOR_DESCRIPTIONS,
     PANEL_SENSOR_DESCRIPTIONS,
+    TRAFFIC_METADATA_SENSOR_DESCRIPTIONS,
+    TRAFFIC_STATUS_SENSOR_DESCRIPTIONS,
+    traffic_used_by_limit_rule,
     usage_percentage,
 )
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass
@@ -215,6 +223,50 @@ def test_usage_percentage_handles_zero_and_invalid_totals() -> None:
     assert usage_percentage(None, 100) is None
     assert usage_percentage(1, None) is None
     assert usage_percentage(1, 0) is None
+
+
+@pytest.mark.parametrize(
+    ("limit_type", "uploaded", "downloaded", "expected"),
+    [
+        (TrafficLimitType.SUM, 40, 80, 120),
+        (TrafficLimitType.MAX, 40, 80, 80),
+        (TrafficLimitType.MIN, 40, 80, 40),
+        (TrafficLimitType.UP, 40, 80, 40),
+        (TrafficLimitType.DOWN, 40, 80, 80),
+        (TrafficLimitType.SUM, None, 80, None),
+        (TrafficLimitType.MAX, 40, None, None),
+        (TrafficLimitType.MIN, None, None, None),
+        (TrafficLimitType.UP, None, 80, None),
+        (TrafficLimitType.DOWN, None, 80, 80),
+    ],
+)
+def test_traffic_limit_calculation_rules(
+    limit_type: TrafficLimitType,
+    uploaded: int | None,
+    downloaded: int | None,
+    expected: int | None,
+) -> None:
+    """All five rules consume only the counters required by their semantics."""
+    node_payload = _node_payload()
+    node_payload.update({"traffic_limit": 100, "traffic_limit_type": limit_type.value})
+    status_payload = _status_payload()
+    status_payload["net_total_up"] = uploaded
+    status_payload["net_total_down"] = downloaded
+    node = parse_nodes([node_payload])[NODE_UUID]
+    status = parse_statuses([status_payload])[NODE_UUID]
+
+    assert traffic_used_by_limit_rule(node, status) == expected
+
+
+def test_unknown_traffic_limit_type_is_not_guessed() -> None:
+    """An unknown remote rule never falls back to a subjective calculation."""
+    node_payload = _node_payload()
+    node_payload.update({"traffic_limit": 100, "traffic_limit_type": "future-rule"})
+    node = parse_nodes([node_payload])[NODE_UUID]
+    status = parse_statuses([_status_payload()])[NODE_UUID]
+
+    assert node.traffic_limit_type is None
+    assert traffic_used_by_limit_rule(node, status) is None
 
 
 async def test_panel_and_node_core_entities(hass: HomeAssistant) -> None:
@@ -1036,6 +1088,260 @@ async def test_expiry_entities_are_added_when_metadata_appears(
     assert registry.async_get_entity_id("sensor", DOMAIN, unique_id) is not None
 
 
+async def test_traffic_limit_entities_and_reset_sensitive_usage(
+    hass: HomeAssistant,
+) -> None:
+    """Traffic entities expose uncapped usage without locally accumulating resets."""
+    node = _node_payload()
+    node.update({"traffic_limit": 100, "traffic_limit_type": "sum"})
+    status = _status_payload()
+    status.update({"net_total_up": 80, "net_total_down": 40})
+    entry = await _setup_entry(
+        hass,
+        _bootstrap(node_payloads=[node], status_payloads=[status]),
+    )
+    scope = f"node:{NODE_UUID}"
+    limit_id = _entity_id(
+        hass, "sensor", _unique_id(entry.entry_id, scope, "traffic_limit")
+    )
+    type_id = _entity_id(
+        hass, "sensor", _unique_id(entry.entry_id, scope, "traffic_limit_type")
+    )
+    used_id = _entity_id(
+        hass,
+        "sensor",
+        _unique_id(entry.entry_id, scope, "traffic_used_by_limit_rule"),
+    )
+    usage_id = _entity_id(
+        hass, "sensor", _unique_id(entry.entry_id, scope, "traffic_limit_usage")
+    )
+
+    assert _state(hass, limit_id).state == "100"
+    assert _state(hass, used_id).state == "120"
+    assert _state(hass, usage_id).state == "120.0"
+    assert _state(hass, limit_id).attributes[ATTR_DEVICE_CLASS] == (
+        SensorDeviceClass.DATA_SIZE
+    )
+    assert _state(hass, used_id).attributes[ATTR_DEVICE_CLASS] == (
+        SensorDeviceClass.DATA_SIZE
+    )
+    assert _state(hass, used_id).attributes[ATTR_UNIT_OF_MEASUREMENT] == (
+        UnitOfInformation.BYTES
+    )
+    assert _state(hass, used_id).attributes["state_class"] == SensorStateClass.TOTAL
+    assert _state(hass, used_id).attributes["calculation_source"] == ("agent_counters")
+    assert _state(hass, used_id).attributes["reset_sensitive"] is True
+    assert _state(hass, usage_id).attributes[ATTR_UNIT_OF_MEASUREMENT] == PERCENTAGE
+
+    type_entry = er.async_get(hass).async_get(type_id)
+    assert type_entry is not None
+    assert type_entry.disabled_by is er.RegistryEntryDisabler.INTEGRATION
+    assert type_entry.entity_category is EntityCategory.DIAGNOSTIC
+    assert hass.states.get(type_id) is None
+
+    reset_status = _status_payload()
+    reset_status.update({"net_total_up": 4, "net_total_down": 6})
+    entry.runtime_data.coordinator.async_set_updated_data(
+        _updated_snapshot(entry, statuses=parse_statuses([reset_status]))
+    )
+    await hass.async_block_till_done()
+    assert _state(hass, used_id).state == "10"
+    assert _state(hass, usage_id).state == "10.0"
+
+
+async def test_traffic_static_and_derived_availability(
+    hass: HomeAssistant,
+) -> None:
+    """Limits survive node outages while Agent-derived values do not."""
+    node = _node_payload()
+    node.update({"traffic_limit": 1000, "traffic_limit_type": "max"})
+    bootstrap = _bootstrap(node_payloads=[node])
+    entry = await _setup_entry(hass, bootstrap)
+    scope = f"node:{NODE_UUID}"
+    limit_id = _entity_id(
+        hass, "sensor", _unique_id(entry.entry_id, scope, "traffic_limit")
+    )
+    used_id = _entity_id(
+        hass,
+        "sensor",
+        _unique_id(entry.entry_id, scope, "traffic_used_by_limit_rule"),
+    )
+    usage_id = _entity_id(
+        hass, "sensor", _unique_id(entry.entry_id, scope, "traffic_limit_usage")
+    )
+
+    entry.runtime_data.coordinator.async_set_updated_data(
+        _updated_snapshot(
+            entry,
+            statuses=parse_statuses([_status_payload(online=False)]),
+        )
+    )
+    await hass.async_block_till_done()
+    assert _state(hass, limit_id).state == "1000"
+    assert _state(hass, used_id).state == STATE_UNAVAILABLE
+    assert _state(hass, usage_id).state == STATE_UNAVAILABLE
+
+    entry.runtime_data.coordinator.async_set_update_error(
+        UpdateFailed("sanitized panel outage")
+    )
+    await hass.async_block_till_done()
+    assert _state(hass, limit_id).state == STATE_UNAVAILABLE
+    assert _state(hass, used_id).state == STATE_UNAVAILABLE
+    assert _state(hass, usage_id).state == STATE_UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    ("limit", "limit_type", "derived_available"),
+    [
+        (0, "sum", False),
+        (100, "future-rule", False),
+        (100, "sum", True),
+    ],
+)
+async def test_traffic_limit_creation_and_unknown_rule(
+    hass: HomeAssistant,
+    limit: int,
+    limit_type: str,
+    derived_available: bool,
+) -> None:
+    """Zero limits create nothing; unknown rules retain only authoritative data."""
+    node = _node_payload()
+    node.update({"traffic_limit": limit, "traffic_limit_type": limit_type})
+    entry = await _setup_entry(hass, _bootstrap(node_payloads=[node]))
+    registry = er.async_get(hass)
+    scope = f"node:{NODE_UUID}"
+    limit_unique_id = _unique_id(entry.entry_id, scope, "traffic_limit")
+    used_unique_id = _unique_id(entry.entry_id, scope, "traffic_used_by_limit_rule")
+    usage_unique_id = _unique_id(entry.entry_id, scope, "traffic_limit_usage")
+
+    if limit == 0:
+        for unique_id in (limit_unique_id, used_unique_id, usage_unique_id):
+            assert registry.async_get_entity_id("sensor", DOMAIN, unique_id) is None
+        return
+
+    assert registry.async_get_entity_id("sensor", DOMAIN, limit_unique_id) is not None
+    used_id = _entity_id(hass, "sensor", used_unique_id)
+    usage_id = _entity_id(hass, "sensor", usage_unique_id)
+    if derived_available:
+        assert _state(hass, used_id).state != STATE_UNAVAILABLE
+        assert _state(hass, usage_id).state != STATE_UNAVAILABLE
+    else:
+        assert _state(hass, used_id).state == STATE_UNAVAILABLE
+        assert _state(hass, usage_id).state == STATE_UNAVAILABLE
+
+
+async def test_traffic_entities_follow_option_and_clean_registry(
+    hass: HomeAssistant,
+) -> None:
+    """The traffic option removes and restores every traffic registry entity."""
+    node = _node_payload()
+    node.update({"traffic_limit": 1000, "traffic_limit_type": "down"})
+    bootstrap = _bootstrap(node_payloads=[node])
+    entry = await _setup_entry(
+        hass,
+        bootstrap,
+        options={CONF_ENABLE_TRAFFIC_ENTITIES: False},
+    )
+    registry = er.async_get(hass)
+    scope = f"node:{NODE_UUID}"
+    keys = {
+        "traffic_limit",
+        "traffic_limit_type",
+        "traffic_used_by_limit_rule",
+        "traffic_limit_usage",
+    }
+
+    for key in keys:
+        assert (
+            registry.async_get_entity_id(
+                "sensor", DOMAIN, _unique_id(entry.entry_id, scope, key)
+            )
+            is None
+        )
+
+    hass.config_entries.async_update_entry(
+        entry,
+        options={CONF_ENABLE_TRAFFIC_ENTITIES: True},
+    )
+    with patch(
+        "custom_components.komari.api.KomariApiClient.async_get_bootstrap",
+        new=AsyncMock(return_value=bootstrap),
+    ):
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+
+    for key in keys:
+        assert (
+            registry.async_get_entity_id(
+                "sensor", DOMAIN, _unique_id(entry.entry_id, scope, key)
+            )
+            is not None
+        )
+
+    hass.config_entries.async_update_entry(
+        entry,
+        options={CONF_ENABLE_TRAFFIC_ENTITIES: False},
+    )
+    with patch(
+        "custom_components.komari.api.KomariApiClient.async_get_bootstrap",
+        new=AsyncMock(return_value=bootstrap),
+    ):
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+
+    for key in keys:
+        assert (
+            registry.async_get_entity_id(
+                "sensor", DOMAIN, _unique_id(entry.entry_id, scope, key)
+            )
+            is None
+        )
+
+
+async def test_two_panels_keep_same_uuid_traffic_entities_separate(
+    hass: HomeAssistant,
+) -> None:
+    """Traffic entities remain entry-scoped when panels share a node UUID."""
+    node_a = _node_payload()
+    node_a.update({"traffic_limit": 1000, "traffic_limit_type": "up"})
+    status_a = _status_payload()
+    status_a["net_total_up"] = 100
+    node_b = _node_payload()
+    node_b.update({"traffic_limit": 2000, "traffic_limit_type": "down"})
+    status_b = _status_payload()
+    status_b["net_total_down"] = 400
+
+    entry_a = await _setup_entry(
+        hass,
+        _bootstrap(node_payloads=[node_a], status_payloads=[status_a]),
+        title="Panel A",
+        url="https://traffic-a.example.test",
+    )
+    entry_b = await _setup_entry(
+        hass,
+        _bootstrap(node_payloads=[node_b], status_payloads=[status_b]),
+        title="Panel B",
+        url="https://traffic-b.example.test",
+    )
+    unique_a = _unique_id(
+        entry_a.entry_id,
+        f"node:{NODE_UUID}",
+        "traffic_used_by_limit_rule",
+    )
+    unique_b = _unique_id(
+        entry_b.entry_id,
+        f"node:{NODE_UUID}",
+        "traffic_used_by_limit_rule",
+    )
+    entity_a = _entity_id(hass, "sensor", unique_a)
+    entity_b = _entity_id(hass, "sensor", unique_b)
+
+    assert unique_a != unique_b
+    assert entity_a != entity_b
+    assert _state(hass, entity_a).state == "100"
+    assert _state(hass, entity_b).state == "400"
+
+
 def test_description_defaults_match_the_p1_contract() -> None:
     """Description tables encode the planned default enablement policy."""
     panel = {description.key: description for description in PANEL_SENSOR_DESCRIPTIONS}
@@ -1064,3 +1370,20 @@ def test_description_defaults_match_the_p1_contract() -> None:
     assert expiry_sensor["billing_cycle"].entity_registry_enabled_default is False
     assert expiry_binary["expired"].entity_registry_enabled_default is True
     assert expiry_binary["auto_renewal"].entity_registry_enabled_default is False
+    traffic_metadata = {
+        description.key: description
+        for description in TRAFFIC_METADATA_SENSOR_DESCRIPTIONS
+    }
+    traffic_status = {
+        description.key: description
+        for description in TRAFFIC_STATUS_SENSOR_DESCRIPTIONS
+    }
+    assert traffic_metadata["traffic_limit"].entity_registry_enabled_default is True
+    assert (
+        traffic_metadata["traffic_limit_type"].entity_registry_enabled_default is False
+    )
+    assert (
+        traffic_status["traffic_used_by_limit_rule"].entity_registry_enabled_default
+        is True
+    )
+    assert traffic_status["traffic_limit_usage"].entity_registry_enabled_default is True

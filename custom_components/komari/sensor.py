@@ -25,6 +25,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .entity import KomariNodeEntity, KomariPanelEntity
+from .models import TrafficLimitType
 from .options import get_options
 
 if TYPE_CHECKING:
@@ -119,6 +120,52 @@ def _remaining_time(node: KomariNode) -> float | None:
     return max(0.0, (node.expired_at - dt_util.utcnow()).total_seconds())
 
 
+def _has_traffic_limit(node: KomariNode) -> bool:
+    """Return whether the node has a positive configured traffic limit."""
+    return node.traffic_limit is not None and node.traffic_limit > 0
+
+
+def traffic_used_by_limit_rule(
+    node: KomariNode,
+    status: KomariNodeStatus,
+) -> int | None:
+    """Apply Komari's configured limit rule to current Agent counters."""
+    uploaded = status.network_total_up
+    downloaded = status.network_total_down
+    match node.traffic_limit_type:
+        case TrafficLimitType.SUM:
+            if uploaded is None or downloaded is None:
+                return None
+            return uploaded + downloaded
+        case TrafficLimitType.MAX:
+            if uploaded is None or downloaded is None:
+                return None
+            return max(uploaded, downloaded)
+        case TrafficLimitType.MIN:
+            if uploaded is None or downloaded is None:
+                return None
+            return min(uploaded, downloaded)
+        case TrafficLimitType.UP:
+            return uploaded
+        case TrafficLimitType.DOWN:
+            return downloaded
+        case _:
+            return None
+
+
+def _traffic_limit_usage(
+    node: KomariNode,
+    status: KomariNodeStatus,
+) -> float | None:
+    """Return an uncapped percentage based on reset-sensitive Agent counters."""
+    if not _has_traffic_limit(node):
+        return None
+    used = traffic_used_by_limit_rule(node, status)
+    if used is None or node.traffic_limit is None:
+        return None
+    return used / node.traffic_limit * 100
+
+
 @dataclass(frozen=True, kw_only=True)
 class KomariPanelSensorEntityDescription(SensorEntityDescription):
     """Describe a panel sensor."""
@@ -140,6 +187,14 @@ class KomariNodeMetadataSensorEntityDescription(SensorEntityDescription):
     """Describe a node sensor sourced from static inventory metadata."""
 
     value_fn: Callable[[KomariNode], SensorValue]
+    create_fn: Callable[[KomariNode], bool]
+
+
+@dataclass(frozen=True, kw_only=True)
+class KomariNodeTrafficSensorEntityDescription(SensorEntityDescription):
+    """Describe a node sensor calculated from metadata and Agent counters."""
+
+    value_fn: Callable[[KomariNode, KomariNodeStatus], SensorValue]
     create_fn: Callable[[KomariNode], bool]
 
 
@@ -404,6 +459,62 @@ EXPIRY_SENSOR_KEYS = frozenset(
     description.key for description in EXPIRY_SENSOR_DESCRIPTIONS
 )
 
+TRAFFIC_METADATA_SENSOR_DESCRIPTIONS: tuple[
+    KomariNodeMetadataSensorEntityDescription, ...
+] = (
+    KomariNodeMetadataSensorEntityDescription(
+        key="traffic_limit",
+        translation_key="traffic_limit",
+        device_class=SensorDeviceClass.DATA_SIZE,
+        native_unit_of_measurement=UnitOfInformation.BYTES,
+        create_fn=_has_traffic_limit,
+        value_fn=lambda node: node.traffic_limit,
+    ),
+    KomariNodeMetadataSensorEntityDescription(
+        key="traffic_limit_type",
+        translation_key="traffic_limit_type",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        create_fn=_has_traffic_limit,
+        value_fn=lambda node: (
+            node.traffic_limit_type.value
+            if node.traffic_limit_type is not None
+            else None
+        ),
+    ),
+)
+
+TRAFFIC_STATUS_SENSOR_DESCRIPTIONS: tuple[
+    KomariNodeTrafficSensorEntityDescription, ...
+] = (
+    KomariNodeTrafficSensorEntityDescription(
+        key="traffic_used_by_limit_rule",
+        translation_key="traffic_used_by_limit_rule",
+        device_class=SensorDeviceClass.DATA_SIZE,
+        native_unit_of_measurement=UnitOfInformation.BYTES,
+        state_class=SensorStateClass.TOTAL,
+        create_fn=_has_traffic_limit,
+        value_fn=traffic_used_by_limit_rule,
+    ),
+    KomariNodeTrafficSensorEntityDescription(
+        key="traffic_limit_usage",
+        translation_key="traffic_limit_usage",
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        create_fn=_has_traffic_limit,
+        value_fn=_traffic_limit_usage,
+    ),
+)
+
+TRAFFIC_SENSOR_KEYS = frozenset(
+    description.key
+    for description in (
+        *TRAFFIC_METADATA_SENSOR_DESCRIPTIONS,
+        *TRAFFIC_STATUS_SENSOR_DESCRIPTIONS,
+    )
+)
+
 
 class KomariPanelSensor(KomariPanelEntity, SensorEntity):
     """A sensor on the panel service device."""
@@ -493,6 +604,51 @@ class KomariNodeMetadataSensor(KomariNodeEntity, SensorEntity):
         return super().available and self.native_value is not None
 
 
+class KomariNodeTrafficSensor(KomariNodeEntity, SensorEntity):
+    """A traffic-limit sensor calculated from current Agent counters."""
+
+    entity_description: KomariNodeTrafficSensorEntityDescription
+
+    def __init__(
+        self,
+        entry: KomariConfigEntry,
+        node_uuid: str,
+        description: KomariNodeTrafficSensorEntityDescription,
+    ) -> None:
+        """Initialize a reset-sensitive traffic-limit sensor."""
+        super().__init__(entry, node_uuid, description)
+
+    @property
+    @override
+    def native_value(self) -> SensorValue:
+        """Return a value calculated from one coherent snapshot."""
+        if (node := self.node) is None or (status := self.status) is None:
+            return None
+        return self.entity_description.value_fn(node, status)
+
+    @property
+    @override
+    def available(self) -> bool:
+        """Require an online node and all counters needed by the limit rule."""
+        return (
+            super().available
+            and (status := self.status) is not None
+            and status.online
+            and self.native_value is not None
+        )
+
+    @property
+    @override
+    def extra_state_attributes(self) -> dict[str, str | bool] | None:
+        """Describe the source and reset semantics without exposing node data."""
+        if self.entity_description.key != "traffic_used_by_limit_rule":
+            return None
+        return {
+            "calculation_source": "agent_counters",
+            "reset_sensitive": True,
+        }
+
+
 def _remove_node_sensor_keys(
     registry: er.EntityRegistry,
     entry_id: str,
@@ -521,6 +677,8 @@ async def async_setup_entry(
 
     if not options.enable_expiry_entities:
         _remove_node_sensor_keys(registry, entry.entry_id, EXPIRY_SENSOR_KEYS)
+    if not options.enable_traffic_entities:
+        _remove_node_sensor_keys(registry, entry.entry_id, TRAFFIC_SENSOR_KEYS)
 
     for node_uuid, node in coordinator.data.nodes.items():
         status = coordinator.data.statuses.get(node_uuid)
@@ -565,6 +723,27 @@ async def async_setup_entry(
                     known_entity_keys.add(entity_key)
                     entities.append(
                         KomariNodeMetadataSensor(entry, node_uuid, description)
+                    )
+            if options.enable_traffic_entities:
+                for description in TRAFFIC_METADATA_SENSOR_DESCRIPTIONS:
+                    entity_key = (node_uuid, description.key)
+                    if entity_key in known_entity_keys or not description.create_fn(
+                        node
+                    ):
+                        continue
+                    known_entity_keys.add(entity_key)
+                    entities.append(
+                        KomariNodeMetadataSensor(entry, node_uuid, description)
+                    )
+                for description in TRAFFIC_STATUS_SENSOR_DESCRIPTIONS:
+                    entity_key = (node_uuid, description.key)
+                    if entity_key in known_entity_keys or not description.create_fn(
+                        node
+                    ):
+                        continue
+                    known_entity_keys.add(entity_key)
+                    entities.append(
+                        KomariNodeTrafficSensor(entry, node_uuid, description)
                     )
         if entities:
             async_add_entities(entities)

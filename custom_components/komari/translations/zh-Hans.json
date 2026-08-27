@@ -164,6 +164,18 @@
       "billing_cycle": {
         "name": "计费周期"
       },
+      "traffic_limit": {
+        "name": "流量限额"
+      },
+      "traffic_limit_type": {
+        "name": "流量限额口径"
+      },
+      "traffic_used_by_limit_rule": {
+        "name": "按限额口径折算的流量"
+      },
+      "traffic_limit_usage": {
+        "name": "流量限额使用率"
+      },
       "cpu_usage": {
         "name": "CPU 使用率"
       },

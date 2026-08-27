@@ -164,6 +164,18 @@
       "billing_cycle": {
         "name": "Billing cycle"
       },
+      "traffic_limit": {
+        "name": "Traffic limit"
+      },
+      "traffic_limit_type": {
+        "name": "Traffic limit type"
+      },
+      "traffic_used_by_limit_rule": {
+        "name": "Traffic used by limit rule"
+      },
+      "traffic_limit_usage": {
+        "name": "Traffic limit usage"
+      },
       "cpu_usage": {
         "name": "CPU usage"
       },
