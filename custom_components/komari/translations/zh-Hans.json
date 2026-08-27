@@ -20,6 +20,21 @@
         "data": {
           "api_key": "API 密钥"
         }
+      },
+      "reconfigure": {
+        "title": "重新配置 Komari 面板",
+        "description": "修改面板地址或 TLS 验证设置；现有 API 密钥会保留。",
+        "data": {
+          "url": "面板地址",
+          "verify_ssl": "验证 TLS 证书"
+        }
+      },
+      "reconfigure_confirm": {
+        "title": "确认修改面板地址",
+        "description": "是否将同一逻辑面板从 {old_url} 改为 {new_url}？现有设备和实体标识不会改变。",
+        "data": {
+          "confirm": "修改地址并重载"
+        }
       }
     },
     "error": {
@@ -27,12 +42,14 @@
       "invalid_auth": "API 密钥缺失、无效或权限不足。",
       "invalid_response": "面板返回了无效的 RPC2 响应。",
       "invalid_url": "请输入不含用户信息、查询参数和片段的有效 HTTP 或 HTTPS 面板地址。",
+      "not_confirmed": "请确认修改面板地址后再保存。",
       "unsupported_panel": "该面板未提供集成所需的 RPC2 方法。",
       "unknown": "发生未知错误。"
     },
     "abort": {
       "already_configured": "该 Komari 面板已经配置。",
-      "reauth_successful": "API 密钥已更新。"
+      "reauth_successful": "API 密钥已更新。",
+      "reconfigure_successful": "Komari 面板已重新配置。"
     }
   },
   "options": {

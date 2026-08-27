@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import voluptuous as vol
 from custom_components.komari.config_flow import normalize_panel_url
 from custom_components.komari.const import CONF_API_KEY, DOMAIN
 from custom_components.komari.exceptions import (
@@ -307,3 +308,292 @@ async def test_reauth_keeps_old_key_on_failure(hass: HomeAssistant) -> None:
     assert result.get("type") is FlowResultType.FORM
     assert result.get("errors") == {"base": "invalid_auth"}
     assert entry.data[CONF_API_KEY] == "old-key"
+
+
+async def test_reconfigure_equivalent_url_and_tls_reload_once(
+    hass: HomeAssistant,
+) -> None:
+    """Equivalent URLs update TLS directly and never expose the API key."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Primary panel",
+        data={
+            CONF_URL: "https://example.test",
+            CONF_VERIFY_SSL: True,
+            CONF_API_KEY: "preserved-key",
+        },
+    )
+    entry.add_to_hass(hass)
+    original_entry_id = entry.entry_id
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={
+            "source": config_entries.SOURCE_RECONFIGURE,
+            "entry_id": entry.entry_id,
+        },
+    )
+    assert result.get("type") is FlowResultType.FORM
+    assert result.get("step_id") == "reconfigure"
+    schema = result.get("data_schema")
+    assert isinstance(schema, vol.Schema)
+    assert set(schema.schema) == {CONF_URL, CONF_VERIFY_SSL}
+    flow_id = result.get("flow_id")
+    assert flow_id is not None
+
+    with (
+        patch(
+            "custom_components.komari.config_flow.KomariApiClient.async_get_bootstrap",
+            new=AsyncMock(return_value=_bootstrap(name="Renamed panel")),
+        ),
+        patch.object(
+            hass.config_entries,
+            "async_reload",
+            new=AsyncMock(return_value=True),
+        ) as reload_entry,
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            flow_id,
+            {
+                CONF_URL: "https://EXAMPLE.test:443/api/rpc2/",
+                CONF_VERIFY_SSL: False,
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert result.get("type") is FlowResultType.ABORT
+    assert result.get("reason") == "reconfigure_successful"
+    assert entry.entry_id == original_entry_id
+    assert entry.title == "Renamed panel"
+    assert entry.data == {
+        CONF_URL: "https://example.test",
+        CONF_VERIFY_SSL: False,
+        CONF_API_KEY: "preserved-key",
+    }
+    assert reload_entry.await_count == 1
+
+
+async def test_reconfigure_changed_url_requires_confirmation(
+    hass: HomeAssistant,
+) -> None:
+    """A different URL requires confirmation while retaining entry identity."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Primary panel",
+        data={
+            CONF_URL: "https://old.example.test",
+            CONF_VERIFY_SSL: True,
+            CONF_API_KEY: "preserved-key",
+        },
+    )
+    entry.add_to_hass(hass)
+    original_entry_id = entry.entry_id
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={
+            "source": config_entries.SOURCE_RECONFIGURE,
+            "entry_id": entry.entry_id,
+        },
+    )
+    flow_id = result.get("flow_id")
+    assert flow_id is not None
+
+    with patch(
+        "custom_components.komari.config_flow.KomariApiClient.async_get_bootstrap",
+        new=AsyncMock(return_value=_bootstrap(name="Replacement panel")),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            flow_id,
+            {
+                CONF_URL: "https://new.example.test/api/rpc2",
+                CONF_VERIFY_SSL: False,
+            },
+        )
+
+    assert result.get("type") is FlowResultType.FORM
+    assert result.get("step_id") == "reconfigure_confirm"
+    assert result.get("description_placeholders") == {
+        "old_url": "https://old.example.test",
+        "new_url": "https://new.example.test",
+    }
+
+    result = await hass.config_entries.flow.async_configure(
+        flow_id,
+        {"confirm": False},
+    )
+    assert result.get("type") is FlowResultType.FORM
+    assert result.get("errors") == {"base": "not_confirmed"}
+    assert entry.data[CONF_URL] == "https://old.example.test"
+
+    with patch.object(
+        hass.config_entries,
+        "async_reload",
+        new=AsyncMock(return_value=True),
+    ) as reload_entry:
+        result = await hass.config_entries.flow.async_configure(
+            flow_id,
+            {"confirm": True},
+        )
+        await hass.async_block_till_done()
+
+    assert result.get("type") is FlowResultType.ABORT
+    assert result.get("reason") == "reconfigure_successful"
+    assert entry.entry_id == original_entry_id
+    assert entry.title == "Replacement panel"
+    assert entry.data == {
+        CONF_URL: "https://new.example.test",
+        CONF_VERIFY_SSL: False,
+        CONF_API_KEY: "preserved-key",
+    }
+    assert reload_entry.await_count == 1
+
+
+async def test_reconfigure_rejects_other_configured_panel(
+    hass: HomeAssistant,
+) -> None:
+    """Duplicate detection excludes the current entry but includes other entries."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_URL: "https://first.example.test", CONF_VERIFY_SSL: True},
+    )
+    entry.add_to_hass(hass)
+    MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_URL: "https://second.example.test", CONF_VERIFY_SSL: True},
+    ).add_to_hass(hass)
+    bootstrap = AsyncMock(return_value=_bootstrap())
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={
+            "source": config_entries.SOURCE_RECONFIGURE,
+            "entry_id": entry.entry_id,
+        },
+    )
+    flow_id = result.get("flow_id")
+    assert flow_id is not None
+
+    with patch(
+        "custom_components.komari.config_flow.KomariApiClient.async_get_bootstrap",
+        new=bootstrap,
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            flow_id,
+            {
+                CONF_URL: "https://SECOND.example.test:443/api/rpc2/",
+                CONF_VERIFY_SSL: True,
+            },
+        )
+
+    assert result.get("type") is FlowResultType.ABORT
+    assert result.get("reason") == "already_configured"
+    assert entry.data[CONF_URL] == "https://first.example.test"
+    bootstrap.assert_not_awaited()
+
+
+async def test_reconfigure_validation_failure_preserves_entry(
+    hass: HomeAssistant,
+) -> None:
+    """Invalid input and unreachable targets do not mutate the current entry."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Primary panel",
+        data={
+            CONF_URL: "https://old.example.test",
+            CONF_VERIFY_SSL: True,
+            CONF_API_KEY: "preserved-key",
+        },
+    )
+    entry.add_to_hass(hass)
+    original_data = dict(entry.data)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={
+            "source": config_entries.SOURCE_RECONFIGURE,
+            "entry_id": entry.entry_id,
+        },
+    )
+    flow_id = result.get("flow_id")
+    assert flow_id is not None
+
+    bootstrap = AsyncMock(return_value=_bootstrap())
+    with patch(
+        "custom_components.komari.config_flow.KomariApiClient.async_get_bootstrap",
+        new=bootstrap,
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            flow_id,
+            {
+                CONF_URL: "https://user:secret@example.test",
+                CONF_VERIFY_SSL: True,
+            },
+        )
+
+    assert result.get("type") is FlowResultType.FORM
+    assert result.get("step_id") == "reconfigure"
+    assert result.get("errors") == {"base": "invalid_url"}
+    bootstrap.assert_not_awaited()
+
+    with patch(
+        "custom_components.komari.config_flow.KomariApiClient.async_get_bootstrap",
+        new=AsyncMock(side_effect=KomariConnectionError("offline")),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            flow_id,
+            {
+                CONF_URL: "https://unreachable.example.test",
+                CONF_VERIFY_SSL: False,
+            },
+        )
+
+    assert result.get("type") is FlowResultType.FORM
+    assert result.get("errors") == {"base": "cannot_connect"}
+    assert entry.title == "Primary panel"
+    assert entry.data == original_data
+
+
+async def test_reconfigure_uses_host_as_fallback_title(
+    hass: HomeAssistant,
+) -> None:
+    """An unnamed panel uses the normalized host after a TLS-only update."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Old title",
+        data={CONF_URL: "https://fallback.example.test", CONF_VERIFY_SSL: True},
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={
+            "source": config_entries.SOURCE_RECONFIGURE,
+            "entry_id": entry.entry_id,
+        },
+    )
+    flow_id = result.get("flow_id")
+    assert flow_id is not None
+
+    with (
+        patch(
+            "custom_components.komari.config_flow.KomariApiClient.async_get_bootstrap",
+            new=AsyncMock(return_value=_bootstrap(name="")),
+        ),
+        patch.object(
+            hass.config_entries,
+            "async_reload",
+            new=AsyncMock(return_value=True),
+        ),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            flow_id,
+            {
+                CONF_URL: "https://fallback.example.test",
+                CONF_VERIFY_SSL: False,
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert result.get("type") is FlowResultType.ABORT
+    assert entry.title == "fallback.example.test"

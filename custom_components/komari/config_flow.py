@@ -87,6 +87,10 @@ REAUTH_SCHEMA = vol.Schema(
     }
 )
 
+RECONFIGURE_CONFIRM_SCHEMA = vol.Schema(
+    {vol.Required("confirm", default=False): BooleanSelector()}
+)
+
 
 def normalize_panel_url(raw_url: str) -> str:
     """Return a canonical panel root URL or raise ValueError."""
@@ -138,6 +142,9 @@ class KomariConfigFlow(ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
     MINOR_VERSION = 1
+
+    _reconfigure_candidate: dict[str, Any] | None = None
+    _reconfigure_title: str | None = None
 
     @staticmethod
     def async_get_options_flow(
@@ -238,6 +245,100 @@ class KomariConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="reauth_confirm",
             data_schema=REAUTH_SCHEMA,
             description_placeholders={"url": entry.data[CONF_URL]},
+            errors=errors,
+        )
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Change the panel URL or TLS verification for the current entry."""
+        entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            try:
+                normalized_url = normalize_panel_url(str(user_input[CONF_URL]))
+            except KeyError, TypeError, ValueError:
+                errors["base"] = "invalid_url"
+            else:
+                if any(
+                    other_entry.entry_id != entry.entry_id
+                    and other_entry.data.get(CONF_URL) == normalized_url
+                    for other_entry in self._async_current_entries()
+                ):
+                    return self.async_abort(reason="already_configured")
+
+                candidate = dict(entry.data)
+                candidate[CONF_URL] = normalized_url
+                candidate[CONF_VERIFY_SSL] = bool(
+                    user_input.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL)
+                )
+                bootstrap, errors = await self._async_validate_with_errors(candidate)
+                if bootstrap is not None:
+                    host = URL(normalized_url).host or normalized_url
+                    title = bootstrap.panel.name or host
+                    try:
+                        current_url = normalize_panel_url(str(entry.data[CONF_URL]))
+                    except KeyError, TypeError, ValueError:
+                        current_url = str(entry.data.get(CONF_URL, ""))
+
+                    if normalized_url == current_url:
+                        return self.async_update_reload_and_abort(
+                            entry,
+                            title=title,
+                            data=candidate,
+                        )
+
+                    self._reconfigure_candidate = candidate
+                    self._reconfigure_title = title
+                    return await self.async_step_reconfigure_confirm()
+
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_URL,
+                        default=str(entry.data[CONF_URL]),
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.URL)),
+                    vol.Required(
+                        CONF_VERIFY_SSL,
+                        default=bool(
+                            entry.data.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL)
+                        ),
+                    ): BooleanSelector(),
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_reconfigure_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Confirm changing the URL of the logical Komari panel."""
+        entry = self._get_reconfigure_entry()
+        candidate = self._reconfigure_candidate
+        if candidate is None:
+            return await self.async_step_reconfigure()
+
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            if not user_input.get("confirm"):
+                errors["base"] = "not_confirmed"
+            else:
+                return self.async_update_reload_and_abort(
+                    entry,
+                    title=self._reconfigure_title or entry.title,
+                    data=candidate,
+                )
+
+        return self.async_show_form(
+            step_id="reconfigure_confirm",
+            data_schema=RECONFIGURE_CONFIRM_SCHEMA,
+            description_placeholders={
+                "old_url": str(entry.data[CONF_URL]),
+                "new_url": str(candidate[CONF_URL]),
+            },
             errors=errors,
         )
 

@@ -20,6 +20,21 @@
         "data": {
           "api_key": "API key"
         }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Komari panel",
+        "description": "Change the address or TLS verification setting. The API key is preserved.",
+        "data": {
+          "url": "Panel URL",
+          "verify_ssl": "Verify TLS certificate"
+        }
+      },
+      "reconfigure_confirm": {
+        "title": "Confirm panel address change",
+        "description": "Change this logical panel from {old_url} to {new_url}? Existing devices and entities keep their identities.",
+        "data": {
+          "confirm": "Change address and reload"
+        }
       }
     },
     "error": {
@@ -27,12 +42,14 @@
       "invalid_auth": "The API key is missing, invalid, or does not have permission.",
       "invalid_response": "The panel returned an invalid RPC2 response.",
       "invalid_url": "Enter a valid HTTP or HTTPS panel URL without user information, a query, or a fragment.",
+      "not_confirmed": "Confirm the panel address change before saving.",
       "unsupported_panel": "This panel does not expose the RPC2 methods required by the integration.",
       "unknown": "An unexpected error occurred."
     },
     "abort": {
       "already_configured": "This Komari panel is already configured.",
-      "reauth_successful": "The API key was updated successfully."
+      "reauth_successful": "The API key was updated successfully.",
+      "reconfigure_successful": "The Komari panel was reconfigured successfully."
     }
   },
   "options": {
