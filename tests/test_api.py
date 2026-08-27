@@ -22,7 +22,9 @@ from custom_components.komari.const import (
     METHOD_COMMON_PUBLIC_INFO,
     METHOD_COMMON_VERSION,
     METHOD_LATEST_STATUS,
+    METHOD_PING_METRIC_STATS,
     METHOD_PUBLIC_NODES,
+    METHOD_PUBLIC_PING_TASKS,
     METHOD_PUBLIC_SETTINGS,
     METHOD_PUBLIC_VERSION,
 )
@@ -39,6 +41,8 @@ from custom_components.komari.models import (
     TrafficLimitType,
     parse_datetime,
     parse_nodes,
+    parse_ping_metric_stats,
+    parse_ping_tasks,
     parse_statuses,
 )
 
@@ -461,3 +465,131 @@ def test_invalid_status_shape_and_values() -> None:
     status = parse_statuses(status_payload)[NODE_UUID]
     assert status.network_in_rate is None
     assert status.cpu_usage is None
+
+
+def test_ping_task_and_stats_fixtures_are_normalized() -> None:
+    """Current task IDs and per-field missing stats normalize deterministically."""
+    tasks = parse_ping_tasks(load_fixture("ping_tasks.json"))
+    assert tuple(tasks) == ("101", "tcp-202")
+    assert tasks["101"].kind == "http"
+    assert tasks["101"].clients == {
+        "fixture-node-sum",
+        "hidden-fixture-node",
+    }
+
+    stats = parse_ping_metric_stats(load_fixture("ping_stats.json"))
+    first = next(
+        value
+        for key, value in stats.items()
+        if key.node_uuid == "fixture-node-sum" and key.task_id == "101"
+    )
+    second = next(
+        value
+        for key, value in stats.items()
+        if key.node_uuid == "fixture-node-max" and key.task_id == "tcp-202"
+    )
+    assert first.latest == 25
+    assert first.minimum == 10
+    assert first.p99 == 88
+    assert second.minimum is None
+    assert second.total == 120
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [None, {}, ["task"], [{"name": "missing id"}], [{"id": True}]],
+)
+def test_invalid_ping_task_shapes_fail_explicitly(payload: object) -> None:
+    """Malformed Ping task structures never create unstable identities."""
+    with pytest.raises(KomariProtocolError):
+        parse_ping_tasks(payload)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        {},
+        {"stats": ["bad"]},
+        {"stats": [{"task_id": 1}]},
+        {"stats": [{"entity_id": "node", "task_id": True}]},
+    ],
+)
+def test_invalid_ping_stats_shapes_fail_explicitly(payload: object) -> None:
+    """Malformed Ping series data is isolated as a protocol failure."""
+    with pytest.raises(KomariProtocolError):
+        parse_ping_metric_stats(payload)
+
+
+async def test_client_fetches_ping_tasks_and_one_batch_of_stats() -> None:
+    """The typed client uses exactly one request for all node/task combinations."""
+    task_payload = load_fixture("ping_tasks.json")
+    stats_payload = load_fixture("ping_stats.json")
+    session = FakeSession(
+        [],
+        rpc_results={
+            METHOD_PUBLIC_PING_TASKS: task_payload,
+            METHOD_PING_METRIC_STATS: stats_payload,
+        },
+    )
+    client = make_client(session)
+    capabilities = frozenset({METHOD_PUBLIC_PING_TASKS, METHOD_PING_METRIC_STATS})
+
+    tasks = await client.async_get_ping_tasks(capabilities)
+    stats = await client.async_get_ping_stats(
+        capabilities,
+        ("fixture-node-sum", "fixture-node-max"),
+        ("101", "tcp-202"),
+        hours=1,
+        max_points=120,
+    )
+
+    assert len(tasks) == 2
+    assert len(stats) == 2
+    assert len(session.requests) == 2
+    assert session.requests[1]["json"]["params"] == {
+        "entity_ids": ["fixture-node-sum", "fixture-node-max"],
+        "task_ids": ["101", "tcp-202"],
+        "hours": 1,
+        "max_points": 120,
+    }
+
+
+async def test_ping_methods_require_advertised_capabilities() -> None:
+    """The client never guesses optional Ping method availability."""
+    client = make_client(FakeSession([]))
+    with pytest.raises(KomariUnsupportedError):
+        await client.async_get_ping_tasks(frozenset())
+    with pytest.raises(KomariUnsupportedError):
+        await client.async_get_ping_stats(
+            frozenset(),
+            (),
+            (),
+            hours=1,
+            max_points=120,
+        )
+
+
+async def test_metadata_refresh_reprobes_methods_and_panel_versions() -> None:
+    """Six-hour metadata refresh is capability-driven and internally coherent."""
+    capabilities = [
+        METHOD_LATEST_STATUS,
+        METHOD_PUBLIC_NODES,
+        METHOD_PUBLIC_SETTINGS,
+        METHOD_PUBLIC_VERSION,
+    ]
+    session = FakeSession(
+        [],
+        rpc_results={
+            "rpc.version": "2.0",
+            "rpc.methods": capabilities,
+            METHOD_PUBLIC_SETTINGS: {"sitename": "Fixture panel"},
+            METHOD_PUBLIC_VERSION: {"version": "2.0.0", "hash": "fixture"},
+        },
+    )
+
+    panel, discovered = await make_client(session).async_get_metadata()
+
+    assert panel.name == "Fixture panel"
+    assert panel.version == "2.0.0"
+    assert discovered == frozenset(capabilities)

@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import TYPE_CHECKING, cast
 
 import pytest
 from custom_components.komari.const import (
+    CONF_PING_INTERVAL,
+    CONF_PING_TASK_IDS,
     DEFAULT_SCAN_INTERVAL,
     METHOD_LATEST_STATUS,
+    METHOD_PING_METRIC_STATS,
     METHOD_PUBLIC_NODES,
+    METHOD_PUBLIC_PING_TASKS,
 )
 from custom_components.komari.coordinator import (
+    BRANCH_CAPABILITIES,
+    BRANCH_PING_STATS,
+    BRANCH_PING_TASKS,
     KomariDataUpdateCoordinator,
     KomariSnapshot,
 )
@@ -24,14 +32,21 @@ from custom_components.komari.device import (
 from custom_components.komari.exceptions import (
     KomariAuthenticationError,
     KomariConnectionError,
+    KomariMethodNotFoundError,
     KomariPermissionError,
+    KomariProtocolError,
 )
 from custom_components.komari.models import (
     KomariBootstrapData,
     KomariNode,
     KomariNodeStatus,
     KomariPanelInfo,
+    KomariPingSeriesKey,
+    KomariPingStats,
+    KomariPingTask,
     parse_nodes,
+    parse_ping_metric_stats,
+    parse_ping_tasks,
     parse_statuses,
 )
 from homeassistant.const import CONF_URL, CONF_VERIFY_SSL
@@ -79,7 +94,10 @@ def _statuses(*online_states: bool) -> Mapping[str, KomariNodeStatus]:
 
 
 def _bootstrap(
-    *, panel_name: str = "Panel A", nodes: Mapping[str, KomariNode] | None = None
+    *,
+    panel_name: str = "Panel A",
+    nodes: Mapping[str, KomariNode] | None = None,
+    capabilities: frozenset[str] | None = None,
 ) -> KomariBootstrapData:
     """Create initial data for one fake panel."""
     panel_nodes = nodes or _nodes("Node A")
@@ -93,7 +111,8 @@ def _bootstrap(
         ),
         nodes=panel_nodes,
         statuses=_statuses(*([True] * len(panel_nodes))),
-        capabilities=frozenset({METHOD_LATEST_STATUS, METHOD_PUBLIC_NODES}),
+        capabilities=capabilities
+        or frozenset({METHOD_LATEST_STATUS, METHOD_PUBLIC_NODES}),
     )
 
 
@@ -108,9 +127,44 @@ class FakeKomariClient:
         self.bootstrap_error: Exception | None = None
         self.nodes_error: Exception | None = None
         self.statuses_error: Exception | None = None
+        self.ping_tasks: Mapping[str, KomariPingTask] = parse_ping_tasks(
+            [
+                {
+                    "id": 101,
+                    "name": "Fixture task",
+                    "clients": ["node-1"],
+                    "type": "http",
+                    "interval": 30,
+                }
+            ]
+        )
+        self.ping_stats: Mapping[KomariPingSeriesKey, KomariPingStats] = (
+            parse_ping_metric_stats(
+                {
+                    "stats": [
+                        {
+                            "entity_id": "node-1",
+                            "task_id": 101,
+                            "latest": 12,
+                            "loss": 0,
+                            "total": 10,
+                            "valid": 10,
+                        }
+                    ]
+                }
+            )
+        )
+        self.metadata = (bootstrap.panel, bootstrap.capabilities)
+        self.ping_tasks_error: Exception | None = None
+        self.ping_stats_error: Exception | None = None
+        self.metadata_error: Exception | None = None
         self.bootstrap_calls = 0
         self.nodes_calls = 0
         self.statuses_calls = 0
+        self.ping_tasks_calls = 0
+        self.ping_stats_calls = 0
+        self.metadata_calls = 0
+        self.last_ping_request: dict[str, object] | None = None
 
     async def async_get_bootstrap(self) -> KomariBootstrapData:
         """Return or fail the bootstrap request."""
@@ -136,18 +190,61 @@ class FakeKomariClient:
             raise self.statuses_error
         return self.statuses
 
+    async def async_get_ping_tasks(
+        self, capabilities: frozenset[str]
+    ) -> Mapping[str, KomariPingTask]:
+        """Return or fail public Ping task discovery."""
+        assert METHOD_PUBLIC_PING_TASKS in capabilities
+        self.ping_tasks_calls += 1
+        if self.ping_tasks_error is not None:
+            raise self.ping_tasks_error
+        return self.ping_tasks
+
+    async def async_get_ping_stats(
+        self,
+        capabilities: frozenset[str],
+        node_uuids: tuple[str, ...],
+        task_ids: tuple[str, ...],
+        *,
+        hours: int,
+        max_points: int,
+    ) -> Mapping[KomariPingSeriesKey, KomariPingStats]:
+        """Return or fail one batch Ping statistics request."""
+        assert METHOD_PING_METRIC_STATS in capabilities
+        self.ping_stats_calls += 1
+        self.last_ping_request = {
+            "node_uuids": node_uuids,
+            "task_ids": task_ids,
+            "hours": hours,
+            "max_points": max_points,
+        }
+        if self.ping_stats_error is not None:
+            raise self.ping_stats_error
+        return self.ping_stats
+
+    async def async_get_metadata(
+        self,
+    ) -> tuple[KomariPanelInfo, frozenset[str]]:
+        """Return or fail capability metadata refresh."""
+        self.metadata_calls += 1
+        if self.metadata_error is not None:
+            raise self.metadata_error
+        return self.metadata
+
 
 def _coordinator(
     hass: HomeAssistant,
     client: FakeKomariClient,
     *,
     title: str = "Panel A",
+    options: dict[str, object] | None = None,
 ) -> KomariDataUpdateCoordinator:
     """Create a coordinator without loading entity platforms."""
     entry = MockConfigEntry(
         domain="komari",
         title=title,
         data={CONF_URL: "https://example.test", CONF_VERIFY_SSL: True},
+        options=options or {},
     )
     return KomariDataUpdateCoordinator(
         hass,
@@ -266,6 +363,183 @@ def test_inventory_due_without_prior_attempt(hass: HomeAssistant) -> None:
     """A coordinator without an inventory timestamp treats it as due."""
     coordinator = _coordinator(hass, FakeKomariClient(_bootstrap()))
     assert coordinator._inventory_is_due(0) is True
+
+
+async def test_multicadence_bootstrap_batches_selected_ping_stats(
+    hass: HomeAssistant,
+) -> None:
+    """Initial optional branches load once and preserve the locked request shape."""
+    capabilities = frozenset(
+        {
+            METHOD_LATEST_STATUS,
+            METHOD_PUBLIC_NODES,
+            METHOD_PUBLIC_PING_TASKS,
+            METHOD_PING_METRIC_STATS,
+        }
+    )
+    client = FakeKomariClient(_bootstrap(capabilities=capabilities))
+    coordinator = _coordinator(
+        hass,
+        client,
+        options={CONF_PING_TASK_IDS: ["101"], CONF_PING_INTERVAL: 60},
+    )
+
+    first = await coordinator._async_update_data()
+    second = await coordinator._async_update_data()
+
+    assert tuple(first.ping_tasks) == ("101",)
+    assert len(first.ping_stats) == 1
+    assert client.ping_tasks_calls == 1
+    assert client.ping_stats_calls == 1
+    assert client.last_ping_request == {
+        "node_uuids": ("node-1",),
+        "task_ids": ("101",),
+        "hours": 1,
+        "max_points": 120,
+    }
+    assert second.statuses == client.statuses
+    assert coordinator.branch_states[BRANCH_PING_TASKS].fetched_at is not None
+    assert coordinator.branch_states[BRANCH_PING_STATS].fetched_at is not None
+    assert coordinator.ping_stats_available is True
+
+
+async def test_ping_failure_isolated_with_two_poll_ttl_and_recovery(
+    hass: HomeAssistant,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Two failed Ping polls expire only the Ping branch and later recover."""
+    capabilities = frozenset(
+        {
+            METHOD_LATEST_STATUS,
+            METHOD_PUBLIC_NODES,
+            METHOD_PUBLIC_PING_TASKS,
+            METHOD_PING_METRIC_STATS,
+        }
+    )
+    client = FakeKomariClient(_bootstrap(capabilities=capabilities))
+    coordinator = _coordinator(
+        hass,
+        client,
+        options={CONF_PING_TASK_IDS: ["101"]},
+    )
+    initial = await coordinator._async_update_data()
+    client.ping_stats_error = KomariConnectionError("secret endpoint detail")
+
+    with caplog.at_level(logging.DEBUG):
+        for expected_available in (True, False):
+            coordinator._last_ping_stats_attempt = -1_000_000
+            updated = await coordinator._async_update_data()
+            assert updated.ping_stats is initial.ping_stats
+            assert coordinator.ping_stats_available is expected_available
+            assert updated.statuses == client.statuses
+
+        client.ping_stats_error = None
+        coordinator._last_ping_stats_attempt = -1_000_000
+        recovered = await coordinator._async_update_data()
+
+    assert recovered.ping_stats == client.ping_stats
+    assert coordinator.ping_stats_available is True
+    assert "secret endpoint detail" not in caplog.text
+    assert "refresh recovered" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("branch", "method"),
+    [
+        (BRANCH_PING_TASKS, METHOD_PUBLIC_PING_TASKS),
+        (BRANCH_PING_STATS, METHOD_PING_METRIC_STATS),
+    ],
+)
+async def test_optional_method_not_found_removes_only_that_capability(
+    hass: HomeAssistant,
+    branch: str,
+    method: str,
+) -> None:
+    """A stale rpc.methods result cannot make the core coordinator fail."""
+    capabilities = frozenset(
+        {
+            METHOD_LATEST_STATUS,
+            METHOD_PUBLIC_NODES,
+            METHOD_PUBLIC_PING_TASKS,
+            METHOD_PING_METRIC_STATS,
+        }
+    )
+    client = FakeKomariClient(_bootstrap(capabilities=capabilities))
+    error = KomariMethodNotFoundError(-32601, "method unavailable")
+    if branch == BRANCH_PING_TASKS:
+        client.ping_tasks_error = error
+    else:
+        client.ping_stats_error = error
+    coordinator = _coordinator(
+        hass,
+        client,
+        options={CONF_PING_TASK_IDS: ["101"]},
+    )
+
+    snapshot = await coordinator._async_update_data()
+
+    assert method not in snapshot.capabilities
+    assert METHOD_LATEST_STATUS in snapshot.capabilities
+    assert coordinator.branch_states[branch].error_category == "method_not_found"
+
+
+async def test_metadata_refresh_retains_prior_data_on_failure_and_maps_auth(
+    hass: HomeAssistant,
+) -> None:
+    """Six-hour metadata is non-fatal except for credential rejection."""
+    client = FakeKomariClient(_bootstrap())
+    coordinator = _coordinator(hass, client)
+    initial = await coordinator._async_update_data()
+    refreshed_panel = KomariPanelInfo(
+        name="Panel B",
+        version="2.0.0",
+        build_hash="new-build",
+        rpc_version="2.1",
+        private=False,
+    )
+    client.metadata = (refreshed_panel, initial.capabilities)
+    coordinator._last_capabilities_attempt = -1_000_000
+    refreshed = await coordinator._async_update_data()
+    assert refreshed.panel is refreshed_panel
+    assert client.metadata_calls == 1
+
+    client.metadata_error = KomariProtocolError("invalid metadata")
+    coordinator._last_capabilities_attempt = -1_000_000
+    retained = await coordinator._async_update_data()
+    assert retained.panel is refreshed_panel
+    assert coordinator.branch_states[BRANCH_CAPABILITIES].error_category == "protocol"
+
+    client.metadata_error = KomariAuthenticationError("denied")
+    coordinator._last_capabilities_attempt = -1_000_000
+    with pytest.raises(ConfigEntryAuthFailed):
+        await coordinator._async_update_data()
+
+
+async def test_ping_task_authentication_failure_requests_reauth(
+    hass: HomeAssistant,
+) -> None:
+    """Credential rejection in an optional branch still starts Reauth."""
+    capabilities = frozenset(
+        {METHOD_LATEST_STATUS, METHOD_PUBLIC_NODES, METHOD_PUBLIC_PING_TASKS}
+    )
+    client = FakeKomariClient(_bootstrap(capabilities=capabilities))
+    client.ping_tasks_error = KomariPermissionError(-1, "denied")
+    coordinator = _coordinator(hass, client)
+    with pytest.raises(ConfigEntryAuthFailed):
+        await coordinator._async_update_data()
+
+
+def test_branch_due_helpers_and_scan_option(hass: HomeAssistant) -> None:
+    """Each cadence starts due and scan options are panel scoped."""
+    coordinator = _coordinator(
+        hass,
+        FakeKomariClient(_bootstrap()),
+        options={"scan_interval": 15},
+    )
+    assert coordinator.update_interval == timedelta(seconds=15)
+    assert coordinator._ping_tasks_are_due(0)
+    assert coordinator._ping_stats_are_due(0)
+    assert coordinator._capabilities_are_due(0)
 
 
 def test_register_panel_and_node_devices(hass: HomeAssistant) -> None:

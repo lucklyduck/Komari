@@ -19,7 +19,9 @@ from .const import (
     METHOD_COMMON_VERSION,
     METHOD_LATEST_STATUS,
     METHOD_PING,
+    METHOD_PING_METRIC_STATS,
     METHOD_PUBLIC_NODES,
+    METHOD_PUBLIC_PING_TASKS,
     METHOD_PUBLIC_SETTINGS,
     METHOD_PUBLIC_VERSION,
     METHOD_RPC_METHODS,
@@ -40,8 +42,13 @@ from .models import (
     KomariNode,
     KomariNodeStatus,
     KomariPanelInfo,
+    KomariPingSeriesKey,
+    KomariPingStats,
+    KomariPingTask,
     parse_nodes,
     parse_panel_info,
+    parse_ping_metric_stats,
+    parse_ping_tasks,
     parse_statuses,
 )
 
@@ -210,6 +217,48 @@ class KomariApiClient:
     async def async_get_latest_status(self) -> Mapping[str, KomariNodeStatus]:
         """Return all latest node statuses."""
         return parse_statuses(await self.async_call(METHOD_LATEST_STATUS))
+
+    async def async_get_ping_tasks(
+        self,
+        capabilities: frozenset[str],
+    ) -> Mapping[str, KomariPingTask]:
+        """Return public Ping tasks when the panel exposes the typed method."""
+        if METHOD_PUBLIC_PING_TASKS not in capabilities:
+            raise KomariUnsupportedError("Komari does not expose public Ping tasks")
+        return parse_ping_tasks(await self.async_call(METHOD_PUBLIC_PING_TASKS))
+
+    async def async_get_ping_stats(
+        self,
+        capabilities: frozenset[str],
+        node_uuids: tuple[str, ...],
+        task_ids: tuple[str, ...],
+        *,
+        hours: int,
+        max_points: int,
+    ) -> Mapping[KomariPingSeriesKey, KomariPingStats]:
+        """Return one batch of Ping statistics for visible nodes and tasks."""
+        if METHOD_PING_METRIC_STATS not in capabilities:
+            raise KomariUnsupportedError("Komari does not expose Ping statistics")
+        return parse_ping_metric_stats(
+            await self.async_call(
+                METHOD_PING_METRIC_STATS,
+                {
+                    "entity_ids": list(node_uuids),
+                    "task_ids": list(task_ids),
+                    "hours": hours,
+                    "max_points": max_points,
+                },
+            )
+        )
+
+    async def async_get_metadata(self) -> tuple[KomariPanelInfo, frozenset[str]]:
+        """Refresh RPC capabilities, versions, and public panel metadata."""
+        rpc_version, capabilities = await asyncio.gather(
+            self.async_get_rpc_version(),
+            self.async_get_methods(),
+        )
+        panel = await self.async_get_panel_info(capabilities, rpc_version)
+        return panel, capabilities
 
     async def async_get_bootstrap(self) -> KomariBootstrapData:
         """Validate capabilities and return the initial coherent data set."""

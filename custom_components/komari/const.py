@@ -47,6 +47,8 @@ DEFAULT_REQUEST_TIMEOUT = 20.0
 DEFAULT_CONNECT_TIMEOUT = 10.0
 DEFAULT_SCAN_INTERVAL = timedelta(seconds=DEFAULT_SCAN_INTERVAL_SECONDS)
 INVENTORY_REFRESH_INTERVAL = timedelta(minutes=10)
+PING_TASK_REFRESH_INTERVAL = timedelta(minutes=10)
+CAPABILITY_REFRESH_INTERVAL = timedelta(hours=6)
 
 METHOD_PING = "rpc.ping"
 METHOD_RPC_VERSION = "rpc.version"
@@ -58,5 +60,9 @@ METHOD_COMMON_VERSION = "common:getVersion"
 METHOD_PUBLIC_NODES = "public:getNodesInformation"
 METHOD_COMMON_NODES = "common:getNodes"
 METHOD_LATEST_STATUS = "common:getNodesLatestStatus"
+METHOD_PUBLIC_PING_TASKS = "public:getPublicPingTasks"
+METHOD_PING_METRIC_STATS = "public:getPingMetricStats"
+METHOD_PUBLIC_PING_RECORDS = "public:getPingRecords"
+METHOD_COMMON_RECORDS = "common:getRecords"
 
 REQUIRED_METHODS = frozenset({METHOD_LATEST_STATUS})

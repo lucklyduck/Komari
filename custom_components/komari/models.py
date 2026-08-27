@@ -101,6 +101,42 @@ class KomariNodeStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class KomariPingTask:
+    """Normalized public Ping task metadata."""
+
+    task_id: str
+    name: str
+    kind: str | None
+    interval: int | None
+    default_on: bool | None
+    clients: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class KomariPingSeriesKey:
+    """Stable identity of one node/task Ping series."""
+
+    node_uuid: str
+    task_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class KomariPingStats:
+    """Normalized Ping statistics for one node/task pair."""
+
+    latest: float | None
+    loss: float | None
+    minimum: float | None
+    maximum: float | None
+    average: float | None
+    p50: float | None
+    p99: float | None
+    stddev: float | None
+    total: int | None
+    valid: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class KomariBootstrapData:
     """Data required to create and initially load a config entry."""
 
@@ -176,6 +212,72 @@ def parse_statuses(payload: object) -> Mapping[str, KomariNodeStatus]:
             raise KomariProtocolError("Status response is missing online state")
         statuses[node_uuid] = _parse_status(node_uuid, online, raw_status)
     return MappingProxyType(statuses)
+
+
+def parse_ping_tasks(payload: object) -> Mapping[str, KomariPingTask]:
+    """Normalize the public Ping task list without exposing target clients."""
+    if not isinstance(payload, list):
+        raise KomariProtocolError("Ping task response must be an array")
+
+    tasks: dict[str, KomariPingTask] = {}
+    for raw_task in payload:
+        if not isinstance(raw_task, Mapping):
+            raise KomariProtocolError("Each Ping task must be an object")
+        task_id = _identifier(raw_task.get("id"))
+        if task_id is None:
+            raise KomariProtocolError("Ping task is missing id")
+        clients = raw_task.get("clients")
+        normalized_clients = (
+            frozenset(
+                client.strip()
+                for client in clients
+                if isinstance(client, str) and client.strip()
+            )
+            if isinstance(clients, list)
+            else frozenset()
+        )
+        tasks[task_id] = KomariPingTask(
+            task_id=task_id,
+            name=_optional_str(raw_task.get("name")) or f"Ping {task_id}",
+            kind=_optional_str(raw_task.get("type")),
+            interval=_optional_non_negative_int(raw_task.get("interval")),
+            default_on=_optional_bool(raw_task.get("default_on")),
+            clients=normalized_clients,
+        )
+    return MappingProxyType(tasks)
+
+
+def parse_ping_metric_stats(
+    payload: object,
+) -> Mapping[KomariPingSeriesKey, KomariPingStats]:
+    """Normalize the current public Ping statistics response."""
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("stats"), list):
+        raise KomariProtocolError("Ping statistics response must contain an array")
+
+    result: dict[KomariPingSeriesKey, KomariPingStats] = {}
+    for raw_stats in payload["stats"]:
+        if not isinstance(raw_stats, Mapping):
+            raise KomariProtocolError("Each Ping statistic must be an object")
+        node_uuid = _optional_str(raw_stats.get("entity_id")) or _optional_str(
+            raw_stats.get("uuid")
+        )
+        task_id = _identifier(raw_stats.get("task_id"))
+        if node_uuid is None or task_id is None:
+            raise KomariProtocolError("Ping statistic is missing series identity")
+        key = KomariPingSeriesKey(node_uuid=node_uuid, task_id=task_id)
+        result[key] = KomariPingStats(
+            latest=_optional_non_negative_float(raw_stats.get("latest")),
+            loss=_optional_non_negative_float(raw_stats.get("loss")),
+            minimum=_optional_non_negative_float(raw_stats.get("min")),
+            maximum=_optional_non_negative_float(raw_stats.get("max")),
+            average=_optional_non_negative_float(raw_stats.get("avg")),
+            p50=_optional_non_negative_float(raw_stats.get("p50")),
+            p99=_optional_non_negative_float(raw_stats.get("p99")),
+            stddev=_optional_non_negative_float(raw_stats.get("stddev")),
+            total=_optional_non_negative_int(raw_stats.get("total")),
+            valid=_optional_non_negative_int(raw_stats.get("valid")),
+        )
+    return MappingProxyType(result)
 
 
 def _parse_node(node_uuid: str, raw: Mapping[str, Any]) -> KomariNode:
@@ -296,6 +398,14 @@ def _optional_gpu_name(value: object) -> str | None:
     if name is None or name.casefold() in _EMPTY_GPU_NAMES:
         return None
     return name
+
+
+def _identifier(value: object) -> str | None:
+    """Normalize a numeric or string remote identifier to a stable string."""
+    if isinstance(value, bool) or not isinstance(value, str | int):
+        return None
+    normalized = str(value).strip()
+    return normalized or None
 
 
 def _optional_bool(value: object) -> bool | None:
