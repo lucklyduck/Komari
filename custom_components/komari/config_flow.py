@@ -106,6 +106,7 @@ class KomariConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle Komari configuration and API-key reauthentication."""
 
     VERSION = 1
+    MINOR_VERSION = 1
 
     async def _async_validate(self, data: Mapping[str, Any]) -> KomariBootstrapData:
         """Validate one panel without retaining its client session wrapper."""

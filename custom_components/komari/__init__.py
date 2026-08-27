@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from homeassistant.const import CONF_URL, CONF_VERIFY_SSL
@@ -20,9 +21,35 @@ if TYPE_CHECKING:
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
+_LOGGER = logging.getLogger(__name__)
+CONFIG_ENTRY_VERSION = 1
+CONFIG_ENTRY_MINOR_VERSION = 1
+
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the Komari integration."""
+    return True
+
+
+async def async_migrate_entry(
+    hass: HomeAssistant,
+    entry: KomariConfigEntry,
+) -> bool:
+    """Migrate an older Komari config entry without changing its identity."""
+    if entry.version != CONFIG_ENTRY_VERSION:
+        return False
+    if entry.minor_version >= CONFIG_ENTRY_MINOR_VERSION:
+        return True
+
+    try:
+        hass.config_entries.async_update_entry(
+            entry,
+            version=CONFIG_ENTRY_VERSION,
+            minor_version=CONFIG_ENTRY_MINOR_VERSION,
+        )
+    except Exception:
+        _LOGGER.exception("Unable to migrate Komari config entry")
+        return False
     return True
 
 
