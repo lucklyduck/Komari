@@ -125,6 +125,12 @@
       },
       "online": {
         "name": "Online"
+      },
+      "expired": {
+        "name": "Expired"
+      },
+      "auto_renewal": {
+        "name": "Automatic renewal"
       }
     },
     "sensor": {
@@ -148,6 +154,15 @@
       },
       "last_seen": {
         "name": "Last seen"
+      },
+      "expires_at": {
+        "name": "Expires at"
+      },
+      "remaining_time": {
+        "name": "Remaining time"
+      },
+      "billing_cycle": {
+        "name": "Billing cycle"
       },
       "cpu_usage": {
         "name": "CPU usage"

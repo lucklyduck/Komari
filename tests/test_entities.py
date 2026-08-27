@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from custom_components.komari.const import DOMAIN
+from custom_components.komari.binary_sensor import (
+    EXPIRY_BINARY_SENSOR_DESCRIPTIONS,
+)
+from custom_components.komari.const import CONF_ENABLE_EXPIRY_ENTITIES, DOMAIN
 from custom_components.komari.coordinator import KomariSnapshot
 from custom_components.komari.device import get_node_device, get_panel_device
 from custom_components.komari.models import (
@@ -18,6 +22,7 @@ from custom_components.komari.models import (
     parse_statuses,
 )
 from custom_components.komari.sensor import (
+    EXPIRY_SENSOR_DESCRIPTIONS,
     NODE_SENSOR_DESCRIPTIONS,
     PANEL_SENSOR_DESCRIPTIONS,
     usage_percentage,
@@ -32,9 +37,11 @@ from homeassistant.const import (
     CONF_VERIFY_SSL,
     PERCENTAGE,
     STATE_UNAVAILABLE,
+    EntityCategory,
     UnitOfDataRate,
     UnitOfInformation,
     UnitOfTemperature,
+    UnitOfTime,
 )
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -142,12 +149,14 @@ async def _setup_entry(
     *,
     title: str = "Komari Lab",
     url: str = "https://example.test",
+    options: dict[str, Any] | None = None,
 ) -> KomariConfigEntry:
     """Set up one config entry through Home Assistant's real platform loader."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         title=title,
         data={CONF_URL: url, CONF_VERIFY_SSL: True},
+        options=options or {},
     )
     entry.add_to_hass(hass)
     with patch(
@@ -732,6 +741,301 @@ async def test_reload_and_unload_do_not_duplicate_entities(
     assert entry.state is ConfigEntryState.NOT_LOADED
 
 
+@pytest.mark.parametrize(
+    ("expired_at", "expected_expires_at", "remaining", "expired_state"),
+    [
+        (
+            "2026-08-28T08:00:00+08:00",
+            "2026-08-28T00:00:00+00:00",
+            "86400.0",
+            "off",
+        ),
+        (
+            "2026-08-27T00:00:00Z",
+            "2026-08-27T00:00:00+00:00",
+            "0.0",
+            "on",
+        ),
+        (
+            "2026-08-26T08:00:00+08:00",
+            "2026-08-26T00:00:00+00:00",
+            "0.0",
+            "on",
+        ),
+    ],
+)
+async def test_expiry_entities_handle_future_current_past_and_timezone(
+    hass: HomeAssistant,
+    expired_at: str,
+    expected_expires_at: str,
+    remaining: str,
+    expired_state: str,
+) -> None:
+    """Expiry values use exact UTC timestamps and non-negative duration seconds."""
+    now = datetime(2026, 8, 27, tzinfo=UTC)
+    node = _node_payload()
+    node.update(
+        {
+            "expired_at": expired_at,
+            "auto_renewal": True,
+            "billing_cycle": 30,
+        }
+    )
+    with (
+        patch(
+            "custom_components.komari.sensor.dt_util.utcnow",
+            return_value=now,
+        ),
+        patch(
+            "custom_components.komari.binary_sensor.dt_util.utcnow",
+            return_value=now,
+        ),
+    ):
+        entry = await _setup_entry(
+            hass,
+            _bootstrap(node_payloads=[node]),
+        )
+
+    scope = f"node:{NODE_UUID}"
+    expires_id = _entity_id(
+        hass, "sensor", _unique_id(entry.entry_id, scope, "expires_at")
+    )
+    remaining_id = _entity_id(
+        hass, "sensor", _unique_id(entry.entry_id, scope, "remaining_time")
+    )
+    expired_id = _entity_id(
+        hass, "binary_sensor", _unique_id(entry.entry_id, scope, "expired")
+    )
+
+    assert _state(hass, expires_id).state == expected_expires_at
+    assert _state(hass, remaining_id).state == remaining
+    assert _state(hass, expired_id).state == expired_state
+    assert _state(hass, expires_id).attributes[ATTR_DEVICE_CLASS] == (
+        SensorDeviceClass.TIMESTAMP
+    )
+    assert _state(hass, remaining_id).attributes[ATTR_DEVICE_CLASS] == (
+        SensorDeviceClass.DURATION
+    )
+    assert _state(hass, remaining_id).attributes[ATTR_UNIT_OF_MEASUREMENT] == (
+        UnitOfTime.SECONDS
+    )
+    assert _state(hass, expired_id).attributes[ATTR_DEVICE_CLASS] == (
+        BinarySensorDeviceClass.PROBLEM
+    )
+
+
+async def test_expiry_diagnostics_and_offline_availability(
+    hass: HomeAssistant,
+) -> None:
+    """Static expiry metadata survives node outages but not panel outages."""
+    now = datetime(2026, 8, 27, tzinfo=UTC)
+    node = _node_payload()
+    node.update(
+        {
+            "expired_at": "2026-08-28T00:00:00Z",
+            "auto_renewal": False,
+            "billing_cycle": 365,
+        }
+    )
+    bootstrap = _bootstrap(node_payloads=[node])
+    with (
+        patch(
+            "custom_components.komari.sensor.dt_util.utcnow",
+            return_value=now,
+        ),
+        patch(
+            "custom_components.komari.binary_sensor.dt_util.utcnow",
+            return_value=now,
+        ),
+    ):
+        entry = await _setup_entry(hass, bootstrap)
+
+    registry = er.async_get(hass)
+    scope = f"node:{NODE_UUID}"
+    auto_id = _entity_id(
+        hass, "binary_sensor", _unique_id(entry.entry_id, scope, "auto_renewal")
+    )
+    billing_id = _entity_id(
+        hass, "sensor", _unique_id(entry.entry_id, scope, "billing_cycle")
+    )
+    auto_entry = registry.async_get(auto_id)
+    billing_entry = registry.async_get(billing_id)
+    assert auto_entry is not None
+    assert billing_entry is not None
+    assert auto_entry.disabled_by is er.RegistryEntryDisabler.INTEGRATION
+    assert billing_entry.disabled_by is er.RegistryEntryDisabler.INTEGRATION
+    assert auto_entry.entity_category is EntityCategory.DIAGNOSTIC
+    assert billing_entry.entity_category is EntityCategory.DIAGNOSTIC
+
+    registry.async_update_entity(auto_id, disabled_by=None)
+    registry.async_update_entity(billing_id, disabled_by=None)
+    with (
+        patch(
+            "custom_components.komari.api.KomariApiClient.async_get_bootstrap",
+            new=AsyncMock(return_value=bootstrap),
+        ),
+        patch(
+            "custom_components.komari.sensor.dt_util.utcnow",
+            return_value=now,
+        ),
+        patch(
+            "custom_components.komari.binary_sensor.dt_util.utcnow",
+            return_value=now,
+        ),
+    ):
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert _state(hass, auto_id).state == "off"
+    assert _state(hass, billing_id).state == "365"
+    assert _state(hass, billing_id).attributes[ATTR_UNIT_OF_MEASUREMENT] == (
+        UnitOfTime.DAYS
+    )
+
+    expires_id = _entity_id(
+        hass, "sensor", _unique_id(entry.entry_id, scope, "expires_at")
+    )
+    remaining_id = _entity_id(
+        hass, "sensor", _unique_id(entry.entry_id, scope, "remaining_time")
+    )
+    expired_id = _entity_id(
+        hass, "binary_sensor", _unique_id(entry.entry_id, scope, "expired")
+    )
+    coordinator = entry.runtime_data.coordinator
+    with (
+        patch(
+            "custom_components.komari.sensor.dt_util.utcnow",
+            return_value=now,
+        ),
+        patch(
+            "custom_components.komari.binary_sensor.dt_util.utcnow",
+            return_value=now,
+        ),
+    ):
+        coordinator.async_set_updated_data(
+            _updated_snapshot(
+                entry,
+                statuses=parse_statuses([_status_payload(online=False)]),
+            )
+        )
+        await hass.async_block_till_done()
+
+    assert _state(hass, expires_id).state == "2026-08-28T00:00:00+00:00"
+    assert _state(hass, remaining_id).state == "86400.0"
+    assert _state(hass, expired_id).state == "off"
+    assert _state(hass, auto_id).state == "off"
+    assert _state(hass, billing_id).state == "365"
+
+    coordinator.async_set_update_error(UpdateFailed("sanitized panel outage"))
+    await hass.async_block_till_done()
+    for entity_id in (expires_id, remaining_id, expired_id, auto_id, billing_id):
+        assert _state(hass, entity_id).state == STATE_UNAVAILABLE
+
+
+async def test_expiry_entities_follow_option_and_clean_registry(
+    hass: HomeAssistant,
+) -> None:
+    """Disabling expiry removes its registry entries and re-enabling restores them."""
+    node = _node_payload()
+    node.update(
+        {
+            "expired_at": "2030-01-01T00:00:00Z",
+            "auto_renewal": True,
+            "billing_cycle": 30,
+        }
+    )
+    bootstrap = _bootstrap(node_payloads=[node])
+    entry = await _setup_entry(
+        hass,
+        bootstrap,
+        options={CONF_ENABLE_EXPIRY_ENTITIES: False},
+    )
+    registry = er.async_get(hass)
+    scope = f"node:{NODE_UUID}"
+    entity_keys = {
+        "sensor": {"expires_at", "remaining_time", "billing_cycle"},
+        "binary_sensor": {"expired", "auto_renewal"},
+    }
+
+    for platform, keys in entity_keys.items():
+        for key in keys:
+            assert (
+                registry.async_get_entity_id(
+                    platform,
+                    DOMAIN,
+                    _unique_id(entry.entry_id, scope, key),
+                )
+                is None
+            )
+
+    hass.config_entries.async_update_entry(
+        entry,
+        options={CONF_ENABLE_EXPIRY_ENTITIES: True},
+    )
+    with patch(
+        "custom_components.komari.api.KomariApiClient.async_get_bootstrap",
+        new=AsyncMock(return_value=bootstrap),
+    ):
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+
+    for platform, keys in entity_keys.items():
+        for key in keys:
+            assert (
+                registry.async_get_entity_id(
+                    platform,
+                    DOMAIN,
+                    _unique_id(entry.entry_id, scope, key),
+                )
+                is not None
+            )
+
+    hass.config_entries.async_update_entry(
+        entry,
+        options={CONF_ENABLE_EXPIRY_ENTITIES: False},
+    )
+    with patch(
+        "custom_components.komari.api.KomariApiClient.async_get_bootstrap",
+        new=AsyncMock(return_value=bootstrap),
+    ):
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+
+    for platform, keys in entity_keys.items():
+        for key in keys:
+            assert (
+                registry.async_get_entity_id(
+                    platform,
+                    DOMAIN,
+                    _unique_id(entry.entry_id, scope, key),
+                )
+                is None
+            )
+
+
+async def test_expiry_entities_are_added_when_metadata_appears(
+    hass: HomeAssistant,
+) -> None:
+    """An existing node gains expiry entities after an inventory refresh."""
+    entry = await _setup_entry(hass, _bootstrap())
+    registry = er.async_get(hass)
+    unique_id = _unique_id(
+        entry.entry_id,
+        f"node:{NODE_UUID}",
+        "expires_at",
+    )
+    assert registry.async_get_entity_id("sensor", DOMAIN, unique_id) is None
+
+    node = _node_payload()
+    node["expired_at"] = "2030-01-01T00:00:00Z"
+    entry.runtime_data.coordinator.async_set_updated_data(
+        _updated_snapshot(entry, nodes=parse_nodes([node]))
+    )
+    await hass.async_block_till_done()
+
+    assert registry.async_get_entity_id("sensor", DOMAIN, unique_id) is not None
+
+
 def test_description_defaults_match_the_p1_contract() -> None:
     """Description tables encode the planned default enablement policy."""
     panel = {description.key: description for description in PANEL_SENSOR_DESCRIPTIONS}
@@ -748,3 +1052,15 @@ def test_description_defaults_match_the_p1_contract() -> None:
     assert node["disk_total"].entity_registry_enabled_default is False
     assert node["network_total_up"].state_class is SensorStateClass.TOTAL_INCREASING
     assert node["process_count"].entity_registry_enabled_default is False
+    expiry_sensor = {
+        description.key: description for description in EXPIRY_SENSOR_DESCRIPTIONS
+    }
+    expiry_binary = {
+        description.key: description
+        for description in EXPIRY_BINARY_SENSOR_DESCRIPTIONS
+    }
+    assert expiry_sensor["expires_at"].entity_registry_enabled_default is True
+    assert expiry_sensor["remaining_time"].entity_registry_enabled_default is True
+    assert expiry_sensor["billing_cycle"].entity_registry_enabled_default is False
+    assert expiry_binary["expired"].entity_registry_enabled_default is True
+    assert expiry_binary["auto_renewal"].entity_registry_enabled_default is False

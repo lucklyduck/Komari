@@ -125,6 +125,12 @@
       },
       "online": {
         "name": "在线"
+      },
+      "expired": {
+        "name": "已到期"
+      },
+      "auto_renewal": {
+        "name": "自动续费"
       }
     },
     "sensor": {
@@ -148,6 +154,15 @@
       },
       "last_seen": {
         "name": "最后采集"
+      },
+      "expires_at": {
+        "name": "到期时间"
+      },
+      "remaining_time": {
+        "name": "剩余时间"
+      },
+      "billing_cycle": {
+        "name": "计费周期"
       },
       "cpu_usage": {
         "name": "CPU 使用率"

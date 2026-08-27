@@ -17,12 +17,15 @@ from homeassistant.const import (
     UnitOfDataRate,
     UnitOfInformation,
     UnitOfTemperature,
+    UnitOfTime,
 )
 from homeassistant.core import callback
 from homeassistant.helpers import entity_registry as er
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .entity import KomariNodeEntity, KomariPanelEntity
+from .options import get_options
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -104,6 +107,18 @@ def _valid_temperature(value: float | None) -> float | None:
     return value
 
 
+def _has_expiry(node: KomariNode) -> bool:
+    """Return whether the node has a configured expiry timestamp."""
+    return node.expired_at is not None
+
+
+def _remaining_time(node: KomariNode) -> float | None:
+    """Return exact non-negative seconds until expiry."""
+    if node.expired_at is None:
+        return None
+    return max(0.0, (node.expired_at - dt_util.utcnow()).total_seconds())
+
+
 @dataclass(frozen=True, kw_only=True)
 class KomariPanelSensorEntityDescription(SensorEntityDescription):
     """Describe a panel sensor."""
@@ -118,6 +133,14 @@ class KomariNodeSensorEntityDescription(SensorEntityDescription):
     value_fn: Callable[[KomariNodeStatus], SensorValue]
     create_fn: Callable[[KomariNode, KomariNodeStatus | None], bool] = _always_create
     requires_online: bool = True
+
+
+@dataclass(frozen=True, kw_only=True)
+class KomariNodeMetadataSensorEntityDescription(SensorEntityDescription):
+    """Describe a node sensor sourced from static inventory metadata."""
+
+    value_fn: Callable[[KomariNode], SensorValue]
+    create_fn: Callable[[KomariNode], bool]
 
 
 PANEL_SENSOR_DESCRIPTIONS: tuple[KomariPanelSensorEntityDescription, ...] = (
@@ -349,6 +372,38 @@ NODE_SENSOR_DESCRIPTIONS: tuple[KomariNodeSensorEntityDescription, ...] = (
     ),
 )
 
+EXPIRY_SENSOR_DESCRIPTIONS: tuple[KomariNodeMetadataSensorEntityDescription, ...] = (
+    KomariNodeMetadataSensorEntityDescription(
+        key="expires_at",
+        translation_key="expires_at",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        create_fn=_has_expiry,
+        value_fn=lambda node: node.expired_at,
+    ),
+    KomariNodeMetadataSensorEntityDescription(
+        key="remaining_time",
+        translation_key="remaining_time",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.SECONDS,
+        state_class=SensorStateClass.MEASUREMENT,
+        create_fn=_has_expiry,
+        value_fn=_remaining_time,
+    ),
+    KomariNodeMetadataSensorEntityDescription(
+        key="billing_cycle",
+        translation_key="billing_cycle",
+        native_unit_of_measurement=UnitOfTime.DAYS,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        create_fn=_has_expiry,
+        value_fn=lambda node: node.billing_cycle,
+    ),
+)
+
+EXPIRY_SENSOR_KEYS = frozenset(
+    description.key for description in EXPIRY_SENSOR_DESCRIPTIONS
+)
+
 
 class KomariPanelSensor(KomariPanelEntity, SensorEntity):
     """A sensor on the panel service device."""
@@ -409,6 +464,51 @@ class KomariNodeSensor(KomariNodeEntity, SensorEntity):
         return self.native_value is not None
 
 
+class KomariNodeMetadataSensor(KomariNodeEntity, SensorEntity):
+    """A sensor sourced from node inventory metadata."""
+
+    entity_description: KomariNodeMetadataSensorEntityDescription
+
+    def __init__(
+        self,
+        entry: KomariConfigEntry,
+        node_uuid: str,
+        description: KomariNodeMetadataSensorEntityDescription,
+    ) -> None:
+        """Initialize a node metadata sensor."""
+        super().__init__(entry, node_uuid, description)
+
+    @property
+    @override
+    def native_value(self) -> SensorValue:
+        """Return a normalized inventory value without I/O."""
+        if (node := self.node) is None:
+            return None
+        return self.entity_description.value_fn(node)
+
+    @property
+    @override
+    def available(self) -> bool:
+        """Remain available while offline but not while the panel is unreachable."""
+        return super().available and self.native_value is not None
+
+
+def _remove_node_sensor_keys(
+    registry: er.EntityRegistry,
+    entry_id: str,
+    keys: frozenset[str],
+) -> None:
+    """Remove one disabled node sensor family from this config entry."""
+    prefix = f"{entry_id}:node:"
+    for registry_entry in tuple(er.async_entries_for_config_entry(registry, entry_id)):
+        if (
+            registry_entry.domain == "sensor"
+            and registry_entry.unique_id.startswith(prefix)
+            and registry_entry.unique_id.rsplit(":", 1)[-1] in keys
+        ):
+            registry.async_remove(registry_entry.entity_id)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: KomariConfigEntry,
@@ -417,6 +517,10 @@ async def async_setup_entry(
     """Set up panel sensors and dynamically discovered node sensors."""
     coordinator = entry.runtime_data.coordinator
     registry = er.async_get(hass)
+    options = get_options(entry)
+
+    if not options.enable_expiry_entities:
+        _remove_node_sensor_keys(registry, entry.entry_id, EXPIRY_SENSOR_KEYS)
 
     for node_uuid, node in coordinator.data.nodes.items():
         status = coordinator.data.statuses.get(node_uuid)
@@ -440,7 +544,7 @@ async def async_setup_entry(
 
     @callback
     def _async_add_new_node_entities() -> None:
-        entities: list[KomariNodeSensor] = []
+        entities: list[SensorEntity] = []
         for node_uuid, node in coordinator.data.nodes.items():
             status = coordinator.data.statuses.get(node_uuid)
             for description in NODE_SENSOR_DESCRIPTIONS:
@@ -451,6 +555,17 @@ async def async_setup_entry(
                     continue
                 known_entity_keys.add(entity_key)
                 entities.append(KomariNodeSensor(entry, node_uuid, description))
+            if options.enable_expiry_entities:
+                for description in EXPIRY_SENSOR_DESCRIPTIONS:
+                    entity_key = (node_uuid, description.key)
+                    if entity_key in known_entity_keys or not description.create_fn(
+                        node
+                    ):
+                        continue
+                    known_entity_keys.add(entity_key)
+                    entities.append(
+                        KomariNodeMetadataSensor(entry, node_uuid, description)
+                    )
         if entities:
             async_add_entities(entities)
 
