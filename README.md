@@ -1,168 +1,380 @@
 # Komari for Home Assistant
 
-Komari 的 Home Assistant 自定义集成。当前开发分支目标版本为
-`0.2.0-alpha.1`，在 P1 多面板监控 MVP 上增加了可配置调度、到期与流量限额、
-Ping 统计、生命周期清理、Diagnostics 和 Repairs。
+![Version](https://img.shields.io/badge/version-0.2.0--alpha.1-orange)
+[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.8.2%2B-41BDF5?logo=home-assistant&logoColor=white)](https://www.home-assistant.io/)
+[![Komari](https://img.shields.io/badge/Komari-RPC2%20%3E%3D%201.0.7-6F42C1)](https://komari-monitor.github.io/komari-document/)
+![Type](https://img.shields.io/badge/type-custom%20integration-informational)
 
-每次“添加集成”对应一个独立 Komari 面板（一个 Config Entry）。每个面板在
-Home Assistant 中创建一个服务设备，面板下的每个 Komari 节点创建一个子设备。
-因此可以重复添加多个面板；即使不同面板使用相同节点 UUID，设备和实体也不会
-互相合并。
+将一个或多个 [Komari](https://github.com/komari-monitor/komari) 服务器监控面板接入
+[Home Assistant](https://www.home-assistant.io/) 的第三方自定义集成。
 
-## 已实现范围
+每次添加集成对应一个独立的 Komari 面板。集成会为面板创建一个服务设备，并将
+面板中的每个节点创建为独立子设备，从而把服务器状态、资源使用、到期时间、流量
+限额和 Ping 统计用于仪表盘、历史记录与自动化。
 
-- 通过 `{panel_url}/api/rpc2` 使用异步 JSON-RPC 2.0 通信。
-- 支持匿名面板和可选 API Key；API Key 以 Bearer Token 发送。
-- 支持 TLS 证书验证开关、URL 规范化、重复面板阻止和 API Key 重认证。
-- 每个面板拥有独立 API Client、Coordinator、故障状态和数据快照。
-- 核心状态、节点清单、Ping 任务、Ping 统计和能力探测分别调度；核心与 Ping 周期
-  可按面板配置。
-- 节点动态新增；清单刷新失败时保留上次成功的节点集合，连续三次权威清单缺失
-  后才清理陈旧节点设备和实体。
-- 提供完整 Options Flow 和 URL/TLS Reconfigure；API Key 失效时自动发起 Reauth。
-- 到期、续费、计费周期、五种流量限额口径和重置敏感的 Agent 流量计数。
-- 发现并选择 Ping 任务，按节点提供最新延迟、丢包率以及可选的
-  min/max/avg/P50/P99/stddev；每个面板最多 256 个 Ping 实体。
-- 提供不含 URL、Key、IP、UUID、名称、任务目标和真实指标值的 Diagnostics。
-- 为已选 Ping 任务缺失、Ping 实体超限和 HTTPS 关闭 TLS 验证创建可自动清除的
-  Repairs。
-- 中英文配置流程和实体翻译。
+> [!WARNING]
+> 当前版本为 `0.2.0-alpha.1`，适合测试和提前体验，尚未通过 HACS 发布，也不是
+> Home Assistant 或 Komari 官方集成。升级前请备份 Home Assistant 配置。
 
-面板设备提供：
+## 目录
 
-- RPC 连接状态和“任一节点故障”状态。
-- 节点总数、在线数和离线数。
-- Komari 版本、RPC 版本和构建哈希。
+- [主要功能](#主要功能)
+- [设备与实体](#设备与实体)
+- [环境要求](#环境要求)
+- [安装](#安装)
+- [配置](#配置)
+- [选项](#选项)
+- [升级与卸载](#升级与卸载)
+- [注意事项](#注意事项)
+- [故障排查](#故障排查)
+- [常见问题](#常见问题)
+- [开发与测试](#开发与测试)
+- [当前限制与路线图](#当前限制与路线图)
+- [开发与验收指南](DEVELOPMENT.md)
 
-节点设备提供：
+## 主要功能
 
-- 在线状态和最后采集时间。
-- CPU、GPU、内存、Swap、磁盘、1/5/15 分钟负载和温度。
-- 网络上下行速率、Agent 启动后累计上传/下载流量。
-- 进程数、TCP 连接数和 UDP 连接数。
-- 可选的到期、续费、计费周期和流量限额实体。
-- 用户选择的 Ping 任务及统计实体；任务名称只用于显示，任务 ID 才参与实体标识。
+- 通过 Komari `/api/rpc2` 接口进行全异步 JSON-RPC 2.0 只读通信。
+- 支持公开面板匿名访问，以及私有面板的 API Key 认证。
+- 支持同时添加多个面板；每个面板拥有独立配置、轮询周期和故障状态。
+- 自动发现面板节点，并在 Home Assistant 中建立面板与节点的父子设备关系。
+- 提供节点在线状态、资源使用率、负载、温度、网络流量及连接数量。
+- 根据 Komari 数据按需创建 GPU、温度、到期、续费和流量限额实体。
+- 发现 Komari Ping 任务，由用户选择需要同步的任务和统计项。
+- 支持配置重载、API Key 重新认证、URL/TLS 重新配置和旧配置迁移。
+- 连续三次从权威清单中确认对象消失后，清理陈旧节点或 Ping 实体。
+- 提供经过脱敏的 Diagnostics、低噪声错误日志和可自动清除的 Repairs。
+- 提供简体中文和英文配置流程及实体名称。
 
-面板 RPC 断开时，面板连接状态显示为 `off`。节点明确报告离线时，节点连接
-状态显示为 `off`、动态数值实体不可用、最后采集时间保留；没有取得节点状态时，
-连接状态和动态数值实体均不可用。
+## 设备与实体
 
-## 安装与配置
-
-当前 alpha 版本尚未发布为 HACS 仓库。手动测试时，将
-`custom_components/komari` 复制或链接到 Home Assistant 配置目录的
-`custom_components/komari`，重启 Home Assistant，然后在“设置 → 设备与服务”
-中添加 **Komari**。
-
-配置表单需要：
-
-- 面板 URL，例如 `https://monitor.example.com`。输入末尾的 `/api/rpc2` 会被自动
-  移除。
-- 可选 API Key。公开面板可以留空。
-- 是否验证 TLS 证书；生产环境应保持启用。
-
-同一面板只能添加一次。若要监控多个面板，请分别重复“添加集成”。
-
-## 每面板选项
-
-在集成页面打开“配置”可分别设置：
-
-- 核心状态周期：15～300 秒，默认 30 秒。
-- Ping 统计周期：60～1800 秒，默认 300 秒。
-- 是否启用到期/续费和流量限额实体。
-- 最多 8 个 Ping 任务，以及需要创建的统计项。默认统计项为最新延迟和丢包率。
-
-保存选项只重载当前面板。若所选组合超过 256 个 Ping 实体，表单会阻止保存；
-如果后续节点增长导致实际组合超过上限，超出部分不会创建，并会出现 Repair。
-
-“重新配置”可以修改 URL 和 TLS 验证，不会显示或修改 API Key。实际更换 URL 前
-需要二次确认，现有 Config Entry、设备和实体标识保持不变。API Key 只能通过
-自动发起的 Reauth 更新。
-
-累计上传/下载以及按限额口径折算的流量来自 Komari Agent 计数器。Agent 重启可
-能令计数归零，因此集成不会把它当作权威账期用量，也不会在 Home Assistant 本地
-拼接账期流量。
-
-## WSL2 开发环境
-
-Windows 工作目录是唯一权威源码和 Git 仓库；Git 命令使用 Windows Git。
-Python、测试和 Home Assistant 在 `Ubuntu-22.04 / WSL2` 中运行。虚拟环境、uv
-缓存和 HA 配置位于 WSL 的 ext4 用户目录，避免在 `/mnt/c` 下创建大量小文件。
-
-在 WSL 中执行：
-
-```bash
-cd /mnt/c/Users/Elecat/Documents/Code/Python/HomeAssistance
-bash script/bootstrap
+```mermaid
+flowchart TD
+    A[Komari 面板 A Config Entry] --> AS[面板 A 服务设备]
+    AS --> A1[节点设备 1]
+    AS --> A2[节点设备 2]
+    B[Komari 面板 B Config Entry] --> BS[面板 B 服务设备]
+    BS --> B1[节点设备 1]
 ```
 
-该脚本安装或复用 uv，安装 Python 3.14.6，并从 `uv.lock` 同步依赖。质量门为：
+不同面板即使报告相同节点 UUID，也会创建彼此隔离的设备和实体，不会错误合并。
+
+### 面板设备
+
+| 实体 | 类型 | 用途 |
+| --- | --- | --- |
+| RPC 连接 | Connectivity binary sensor | HA 是否能够连接面板 RPC2 |
+| 任一节点故障 | Problem binary sensor | 是否存在明确离线的可见节点 |
+| 节点总数 | Sensor | 当前可见节点数量 |
+| 在线节点数 | Sensor | 当前明确在线的节点数量 |
+| 离线节点数 | Sensor | 当前明确离线的节点数量 |
+| Komari 版本 | Diagnostic sensor | 面板软件版本 |
+| RPC 版本、构建哈希 | Diagnostic sensor | 协议及构建诊断信息 |
+
+### 节点设备
+
+| 分类 | 实体 |
+| --- | --- |
+| 连接状态 | 在线状态、最后采集时间 |
+| 处理器 | CPU 使用率、GPU 使用率（存在有效 GPU 时） |
+| 内存与存储 | 内存使用率/已用/总量、Swap 使用率/已用、磁盘使用率/已用/总量 |
+| 系统负载 | 1、5、15 分钟负载，温度（存在有效温度时） |
+| 网络 | 上下行速率、Agent 启动后累计上传/下载流量 |
+| 连接与进程 | 进程数、TCP 连接数、UDP 连接数 |
+| 到期与续费 | 到期时间、剩余时间、是否到期、自动续费、计费周期 |
+| 流量限额 | 限额、限额口径、按口径计算的已用流量、使用率 |
+| Ping | 最新延迟、丢包率及可选的 min/max/avg/P50/P99/stddev |
+
+部分诊断实体默认禁用。GPU、温度、到期和流量实体只有在服务端提供有效数据时才会
+创建，这种按能力创建的行为是正常设计，并不表示集成加载失败。
+
+## 环境要求
+
+| 项目 | 要求 |
+| --- | --- |
+| Home Assistant | `2026.8.2` 或更高版本；这是当前开发与测试基线 |
+| Komari | `1.0.7` 或更高版本；RPC2 官方最低版本，推荐使用当前稳定版 |
+| 网络 | Home Assistant 必须能够访问面板根地址及其 `/api/rpc2` 路径 |
+| 认证 | 公开面板可匿名；私有面板需要有效 API Key |
+| 安装权限 | 能够向 Home Assistant 配置目录写入 `custom_components` |
+| Python | 普通用户无需单独安装；开发环境使用 Python `3.14.x` |
+
+功能不是单纯按 Komari 版本号启用。集成会调用 `rpc.methods` 探测面板实际能力；旧
+版本缺少可选 Ping 方法时，核心节点监控仍可继续工作。
+
+当前主要在 Home Assistant Core 开发环境中验证。Home Assistant OS、Supervised 和
+Container 只要允许安装自定义集成，理论上使用相同目录结构；正式发布前仍建议先在
+测试实例中验证。
+
+## 安装
+
+### 手动安装
+
+1. 从 GitHub Releases 下载目标版本的源码压缩包并解压。
+2. 将仓库中的 `custom_components/komari` 整个目录复制到 Home Assistant 配置目录：
+
+   ```text
+   <config>/custom_components/komari
+   ```
+
+3. 确认最终路径中直接包含 `manifest.json`，不要多嵌套一层仓库目录：
+
+   ```text
+   <config>/custom_components/komari/manifest.json
+   ```
+
+4. 重启 Home Assistant。
+5. 打开“设置 → 设备与服务 → 添加集成”，搜索 **Komari**。
+
+不同安装方式的 `<config>` 位置可能不同。Home Assistant OS 通常为 `/config`；
+Container 用户应使用映射到容器 `/config` 的宿主机目录。
+
+### HACS
+
+当前版本尚未包含 `hacs.json`，不能作为 HACS 仓库安装。请勿把仓库手动加入 HACS
+后将安装成功视为受支持流程；HACS 发布将在后续版本单独说明。
+
+## 配置
+
+添加集成时需要填写：
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| 面板 URL | 是 | Komari 面板根地址，例如 `https://monitor.example.com` |
+| API Key | 否 | 公开面板可留空；私有面板需要填写 |
+| 验证 TLS 证书 | 是 | 默认开启，生产环境建议始终保持开启 |
+
+URL 末尾误填 `/api/rpc2` 时会自动规范化为面板根地址。URL 不应包含用户名、密码、
+query 或 fragment。同一规范化 URL 只能添加一次。
+
+若需要同时监控多个面板，请重复“添加集成”。每个面板都是独立 Config Entry，可使
+用不同 API Key、TLS 设置、轮询周期和 Ping 任务。
+
+私有面板建议创建仅供 Home Assistant 使用的专用 API Key，不要复用账号密码，也
+不要把 Key 写入 YAML、自动化、截图或公开 Issue。
+
+## 选项
+
+在“设置 → 设备与服务 → Komari → 配置”中，可以为每个面板单独调整：
+
+| 选项 | 默认值 | 可选范围或限制 |
+| --- | ---: | --- |
+| 核心状态轮询周期 | 30 秒 | 15～300 秒 |
+| Ping 统计轮询周期 | 300 秒 | 60～1800 秒 |
+| 到期/续费实体 | 开启 | 可关闭并清理对应实体 |
+| 流量限额实体 | 开启 | 可关闭并清理对应实体 |
+| Ping 任务 | 不选择 | 每个面板最多选择 8 个 |
+| Ping 统计项 | `latest`、`loss` | 可增加 min/max/avg/P50/P99/stddev |
+
+Ping 实体数量按“可见节点 × 已选任务 × 已选统计项”增长。每个面板最多创建 256 个
+Ping 实体；配置时超过上限会阻止保存，运行中因节点增长超过上限会创建 Repair。
+
+### 重新认证与重新配置
+
+- API Key 失效时，Home Assistant 会发起 Reauth；新 Key 成功后沿用原有设备和实体
+  标识。
+- “重新配置”可修改面板 URL 和 TLS 验证设置，但不会显示或修改 API Key。
+- URL 实际变化需要二次确认。若是完全不同的面板，更推荐新增 Config Entry，避免
+  把旧设备身份复用于另一套数据。
+
+## 升级与卸载
+
+### 手动升级
+
+1. 备份 Home Assistant 配置。
+2. 下载目标版本，并用新的 `custom_components/komari` 覆盖旧目录内容。
+3. 重启 Home Assistant。
+4. 在集成页面确认版本、设备和实体正常；不要先删除 Config Entry，否则可能失去
+   原有实体历史关联。
+
+### 卸载
+
+1. 在“设置 → 设备与服务”中删除所有 Komari Config Entry。
+2. 删除 `<config>/custom_components/komari` 目录。
+3. 重启 Home Assistant。
+
+## 注意事项
+
+### 流量并非权威账期用量
+
+累计上传、累计下载和“按限额口径计算的已用流量”来自 Komari Agent 计数器。
+Agent 重启、重装或计数器复位后，数值可能从较小值重新开始。集成会标记
+`calculation_source=agent_counters` 和 `reset_sensitive=true`，不会在 Home
+Assistant 本地猜测或拼接账期账单。
+
+流量限额口径支持 `sum`、`max`、`min`、`up` 和 `down`。使用率允许超过 100%，以便
+自动化识别已经超额的节点。
+
+### 可用性语义
+
+- 面板不可达：面板 RPC 连接显示 `off`，该面板下的数据实体不可用。
+- 节点明确离线：节点连接显示 `off`，动态数值实体不可用，最后采集时间保留。
+- 节点状态缺失：连接状态和动态数值实体显示 unavailable，而不是误报离线。
+- Ping 分支失败：只影响 Ping 实体，不影响 CPU、内存等核心监控。
+- 节点或任务暂时未出现在清单中：连续三次权威清单确认缺失后才会清理。
+
+### 安全与隐私
+
+- 生产环境优先使用 HTTPS，并保持 TLS 证书验证开启。
+- API Key 保存在 Home Assistant Config Entry 中，不会作为实体属性输出。
+- 集成不会把完整 URL、IP、UUID、节点名称、任务目标或原始响应写入 Diagnostics。
+- Diagnostics 已做结构化脱敏，但公开上传前仍应由用户自行检查内容。
+- 集成只调用只读 RPC 方法，不会创建、修改或删除 Komari 面板中的节点和任务。
+
+## 故障排查
+
+### 1. 下载 Diagnostics
+
+打开“设置 → 设备与服务 → Komari”，在目标面板右侧菜单中选择“下载诊断信息”。
+Diagnostics 可用于判断能力、刷新分支和错误类别，不包含真实监控指标值。
+
+### 2. 启用调试日志
+
+临时在 `configuration.yaml` 中加入：
+
+```yaml
+logger:
+  default: info
+  logs:
+    custom_components.komari: debug
+```
+
+重启 Home Assistant 或重新加载日志配置后复现问题。收集完成后请移除该配置，避免
+长期产生大量日志。
+
+### 3. 提交问题时提供
+
+- 集成版本、Home Assistant 版本和 Komari 版本。
+- 问题发生在配置、核心状态、Ping、到期流量还是设备清理阶段。
+- 可复现步骤和预期行为。
+- 已人工检查过的 Diagnostics 与必要日志。
+
+请勿提交 API Key、Cookie、Authorization Header、节点 Token、完整 URL、IP、UUID、
+私有备注或未经脱敏的原始 RPC 响应。
+
+## 常见问题
+
+### Q：安装后搜索不到 Komari？
+
+确认目录为 `<config>/custom_components/komari/manifest.json`，然后完整重启 Home
+Assistant。若目录多嵌套了一层，Home Assistant 不会发现该集成。
+
+### Q：配置时提示无法连接？
+
+确认填写的是面板根地址、Home Assistant 能访问该地址，并且 Komari 版本支持
+`/api/rpc2`。使用 HTTPS 时还应检查证书链和系统时间；不要为了绕过证书错误长期
+关闭 TLS 验证。
+
+### Q：公开面板必须填写 API Key 吗？
+
+不一定。Komari RPC2 允许匿名调用，但面板可以限制公开数据和方法。私有面板或受限
+方法需要 API Key。
+
+### Q：可以同时添加多个 Komari 面板吗？
+
+可以。每次添加都会创建独立 Config Entry、面板设备和节点设备，配置与故障不会
+互相影响。
+
+### Q：为什么没有 GPU 或温度实体？
+
+只有存在有效 GPU 名称、观察到有效 GPU 使用率，或温度位于合理范围时才创建对应
+实体。`0`、空值、`n/a` 和异常温度不会被当作硬件能力。
+
+### Q：为什么没有到期或流量限额实体？
+
+确认相关选项已开启，并检查节点是否配置了有效到期时间或大于零的流量限额。未
+配置相应元数据的节点不会创建这些实体。
+
+### Q：为什么看不到 Ping 实体？
+
+需要面板公开对应 Ping RPC 能力，并在集成选项中显式选择任务和统计项。新增任务
+只会出现在选项中，不会自动创建实体。
+
+### Q：为什么部分 Ping 统计显示 unavailable？
+
+服务端可能没有返回该节点、任务或字段的数据；数据过期、节点离线和 Ping 分支请求
+失败也会令对应实体不可用。单个统计字段缺失不会影响其他 Ping 或核心实体。
+
+### Q：为什么流量值与 Komari 账单周期不一致？
+
+本集成使用 Agent 累计计数器，不是 Komari 的权威账期账单。Agent 重启可能导致
+计数器复位，因此更适合趋势观察和基于当前计数器的提醒。
+
+### Q：API Key 被撤销后怎么办？
+
+Home Assistant 会为原 Config Entry 发起重新认证。在 Reauth 表单中填写替换 Key
+即可，不需要删除并重新添加集成。
+
+### Q：可以通过 HACS 安装吗？
+
+当前不可以。项目尚未添加 HACS 发布元数据，请使用手动安装方式。
+
+### Q：是否支持 Komari 动态/自定义指标？
+
+当前版本尚未实现 F16 动态指标。CPU、内存、磁盘、网络和 Ping 等已内置指标不受
+影响，动态指标计划在后续版本加入。
+
+## 开发与测试
+
+仓库使用 [uv](https://docs.astral.sh/uv/) 管理开发环境，锁定 Python `3.14.x` 和
+Home Assistant 测试依赖。Windows 开发默认在 WSL2 的 `Ubuntu-22.04` 中运行 Python
+与 Home Assistant，Git 操作仍由 Windows Git 完成。
+
+更完整的本地环境、Fake Panel、协议联调和验收说明见
+[开发与验收指南](DEVELOPMENT.md)。
+
+在仓库根目录执行：
 
 ```bash
+bash script/bootstrap
 bash script/lint
 bash script/type-check
 bash script/test
 ```
 
-启动开发 Home Assistant：
+启动 Home Assistant 开发实例：
 
 ```bash
 bash script/develop --log-no-color
 ```
 
-开发配置保存在 `$HOME/.local/share/komari-ha/config`，源码会自动链接到其中。
-Web UI 通常位于 <http://127.0.0.1:8123>。
-
-## 三面板本地验收
-
-第一个 WSL 终端启动三个只监听本机、数据完全脱敏的假 Komari 面板：
+启动脱敏 Fake Panel 并运行协议验收：
 
 ```bash
 bash script/fake-panels
-```
-
-它们分别位于 `http://127.0.0.1:18881`、`http://127.0.0.1:18882` 和
-`http://127.0.0.1:18883`。三者故意包含相同节点 UUID 和 Ping 任务 ID；A/B 分别
-使用 RPC 节点清单的映射与数组响应，C 是使用固定脱敏测试 Key 的私有面板。
-第二个终端执行协议级验收：
-
-```bash
 bash script/smoke-fake-panels
 ```
 
-该检查覆盖共享身份隔离、整面板与 Ping 分支故障、Method Not Found 回退、节点和
-任务增删改名、短延迟以及私有面板 Key 轮换。假面板还提供本地验收控制端点：
+测试默认禁止访问公网。公开面板只能用于获得授权的匿名只读人工兼容性检查，禁止将
+真实节点名称、UUID、地址、任务目标或指标值写入 fixture、日志和测试报告。
 
-- `POST /_control/fail`：模拟该面板 RPC 故障。
-- `POST /_control/recover`：恢复该面板。
-- `POST /_control/add-node`：加入一个固定测试节点。
-- `POST /_control/delete-node`、`rename-node`：删除或改名测试节点。
-- `POST /_control/add-task`、`remove-task`、`rename-task`：控制测试 Ping 任务。
-- `POST /_control/fail-ping`、`recover-ping`：只影响 Ping 分支。
-- `POST /_control/method-not-found`、`restore-method`：模拟首选 Ping 方法失效。
-- `POST /_control/delay`、`clear-delay`：增加或清除短响应延迟。
-- `POST /_control/rotate-key`：轮换私有 Fake C 的固定脱敏测试 Key。
+## 当前限制与路线图
 
-如需对获准测试的公开 Komari 面板执行一次匿名只读检查，可运行：
+当前版本不包含：
 
-```bash
-bash script/smoke-public https://monitor.example.com
-```
+- 动态/自定义指标发现与映射（F16）。
+- HACS 元数据、GitHub Actions 和正式发布自动化。
+- WebSocket、JSON-RPC batch 和完整历史数据导入。
+- Home Assistant 本地账期流量重建。
+- Home Assistant Core 官方集成提交。
 
-该命令只执行 RPC2 bootstrap 验证，不打印或持久化面板名称、节点 UUID、地址或
-指标值。
-
-## 当前边界
-
-动态/自定义指标发现与映射（F16）、HACS 元数据、远程仓库、许可证和 HA Core
-提交不属于当前阶段。WebSocket、JSON-RPC batch、历史数据全量导入和在 HA 本地
-重建账期流量也不在当前范围内。
-
-当前为 alpha 开发版本。公开面板只应用于匿名只读兼容性验证；不要在日志、测试
-fixture 或报告中保存面板名称、节点 UUID、地址、任务目标和指标值。生产环境的
-HTTPS 面板应保持 TLS 证书验证启用。
+后续计划依次完成动态指标、HACS 发布支持、完整兼容性矩阵和稳定版本发布。
 
 ## 设计文档
 
+- [开发与验收指南](DEVELOPMENT.md)
 - [总体设计与调研](KOMARI_HOME_ASSISTANT_INTEGRATION_PLAN.md)
 - [逐功能代码实现方案](KOMARI_HOME_ASSISTANT_IMPLEMENTATION_PLAN.md)
+- [Komari 官方文档](https://komari-monitor.github.io/komari-document/)
+- [Komari RPC2 文档](https://komari-monitor.github.io/komari-document/dev/rpc)
+- [Home Assistant 自定义集成开发文档](https://developers.home-assistant.io/)
+
+## 许可证
+
+当前仓库尚未包含 `LICENSE` 文件。在公开发布或接受外部贡献前，应先选择并添加明确
+的开源许可证；在此之前请勿假定源码已授予复制、修改或再分发许可。
+
+## 免责声明
+
+本项目与 Home Assistant、Nabu Casa 和 Komari 官方无隶属关系。使用本集成产生的
+配置、监控和自动化风险由使用者自行承担。
