@@ -166,8 +166,31 @@ query 或 fragment。同一规范化 URL 只能添加一次。
 | Ping 任务 | 不选择 | 每个面板最多选择 8 个 |
 | Ping 统计项 | `latest`、`loss` | 可增加 min/max/avg/P50/P99/stddev |
 
+>  **注意**: 频率建议按照自己需求调整，过高频率的持续获取可能会消耗过多流量。
+
+### 数据刷新频率
+
+各数据分支在集成首次加载时会立即获取，后续按下频率进行刷新：
+
+| 数据项目 | 默认频率 | 是否可配置 | 说明 |
+| --- | ---: | --- | --- |
+| 节点在线状态、CPU、内存、磁盘、负载、网络和连接数 | 30 秒 | 是，15～300 秒 | 使用当前面板的“核心状态轮询周期” |
+| 到期时间、自动续费、计费周期、流量限额和限额口径 | 10 分钟 | 否 | 这些项目来自节点清单；在 Komari 中修改后，HA 通常会在下一次节点清单刷新时取得新值 |
+| 剩余时间和是否到期 | 30 秒 | 随核心状态周期 | 使用已取得的到期时间和当前 UTC 时间重新计算，因此到期状态最多延迟一个成功的核心轮询周期 |
+| 按限额口径计算的已用流量和使用率 | 30 秒 | 随核心状态周期 | 使用最新 Agent 累计上传/下载计数计算；Agent 重启可能使计数归零 |
+| 节点清单和新节点发现 | 10 分钟 | 否 | 清单暂时刷新失败时保留上一次成功结果，不立即删除节点 |
+| Ping 任务列表 | 10 分钟 | 否 | 新任务先出现在选项中，不会自动启用 |
+| 已选择的 Ping 统计 | 300 秒 | 是，60～1800 秒 | 使用当前面板的“Ping 统计轮询周期” |
+| 面板版本和 RPC 能力 | 6 小时 | 否 | 用于低频能力探测和可选功能降级 |
+
+上述周期从每个 Config Entry 各自计算，多个面板互不影响。若核心状态刷新失败，该面板
+的运行时实体会暂时不可用；节点清单或 Ping 分支单独失败时，会保留旧结果到相应的
+过期或清理条件满足，不影响其他面板和可继续刷新的核心实体。
+
 Ping 实体数量按“可见节点 × 已选任务 × 已选统计项”增长。每个面板最多创建 256 个
 Ping 实体；配置时超过上限会阻止保存，运行中因节点增长超过上限会创建 Repair。
+
+如果需要立即同步数据，可以主动重新加载中枢。这么做会将立刻更新全部数据
 
 ### 重新认证与重新配置
 
@@ -224,8 +247,8 @@ Assistant 本地猜测或拼接账期账单。
 ### 设备名称
 
  - 在面板新增服务器后，集成会自动检测并添加服务器到中枢中
- - 面板修改设备名后，集成可能不会自动同步修改名称
- - 如果需要同步面板修改的设备名，需要主动重新加载集成
+ - 面板修改设备名后，集成会在同步设备清单时进行同步
+ - 如果立即同步面板修改的设备名，需要主动重新加载集成
  - 重新加载集成不会修改在HA上修改的设备名
 
 ## 故障排查
@@ -256,8 +279,9 @@ logger:
 - 可复现步骤和预期行为。
 - 已人工检查过的 Diagnostics 与必要日志。
 
-请勿提交 API Key、Cookie、Authorization Header、节点 Token、完整 URL、IP、UUID、
-私有备注或未经脱敏的原始 RPC 响应。
+请勿提交 API Key、Cookie、Authorization Header、节点 Token、或未经脱敏的原始 RPC 响应。
+
+欢迎提交issues！
 
 ## 常见问题
 
@@ -318,42 +342,8 @@ Home Assistant 会为原 Config Entry 发起重新认证。在 Reauth 表单中�
 
 ### Q：是否支持 Komari 动态/自定义指标？
 
-当前版本尚未实现 F16 动态指标。CPU、内存、磁盘、网络和 Ping 等已内置指标不受
+当前版本尚未实现动态指标。CPU、内存、磁盘、网络和 Ping 等已内置指标不受
 影响，动态指标计划在后续版本加入。
-
-## 开发与测试
-
-仓库使用 [uv](https://docs.astral.sh/uv/) 管理开发环境，锁定 Python `3.14.x` 和
-Home Assistant 测试依赖。Windows 开发默认在 WSL2 的 `Ubuntu-22.04` 中运行 Python
-与 Home Assistant，Git 操作仍由 Windows Git 完成。
-
-更完整的本地环境、Fake Panel、协议联调和验收说明见
-[开发与验收指南](DEVELOPMENT.md)。
-
-在仓库根目录执行：
-
-```bash
-bash script/bootstrap
-bash script/lint
-bash script/type-check
-bash script/test
-```
-
-启动 Home Assistant 开发实例：
-
-```bash
-bash script/develop --log-no-color
-```
-
-启动脱敏 Fake Panel 并运行协议验收：
-
-```bash
-bash script/fake-panels
-bash script/smoke-fake-panels
-```
-
-测试默认禁止访问公网。公开面板只能用于获得授权的匿名只读人工兼容性检查，禁止将
-真实节点名称、UUID、地址、任务目标或指标值写入 fixture、日志和测试报告。
 
 ## 当前限制与路线图
 
@@ -363,7 +353,6 @@ bash script/smoke-fake-panels
 - HACS 元数据、GitHub Actions 和正式发布自动化。
 - WebSocket、JSON-RPC batch 和完整历史数据导入。
 - Home Assistant 本地账期流量重建。
-- Home Assistant Core 官方集成提交。
 
 后续计划依次完成动态指标、HACS 发布支持、完整兼容性矩阵和稳定版本发布。
 
@@ -376,12 +365,8 @@ bash script/smoke-fake-panels
 - [Komari RPC2 文档](https://komari-monitor.github.io/komari-document/dev/rpc)
 - [Home Assistant 自定义集成开发文档](https://developers.home-assistant.io/)
 
-## 许可证
-
-当前仓库尚未包含 `LICENSE` 文件。在公开发布或接受外部贡献前，应先选择并添加明确
-的开源许可证；在此之前请勿假定源码已授予复制、修改或再分发许可。
 
 ## 免责声明
 
-本项目与 Home Assistant、Nabu Casa 和 Komari 官方无隶属关系。使用本集成产生的
+本项目与 Home Assistant、Nabu Casa 和 Komari 官方等无隶属关系。使用本集成产生的
 配置、监控和自动化风险由使用者自行承担。
