@@ -3,6 +3,7 @@
 ![Version](https://img.shields.io/badge/version-0.2.0--alpha.1-orange)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.8.2%2B-41BDF5?logo=home-assistant&logoColor=white)](https://www.home-assistant.io/)
 [![Komari](https://img.shields.io/badge/Komari-RPC2%20%3E%3D%201.0.7-6F42C1)](https://komari-monitor.github.io/komari-document/)
+[![Validate](https://github.com/lucklyduck/Komari/actions/workflows/validate.yml/badge.svg)](https://github.com/lucklyduck/Komari/actions/workflows/validate.yml)
 ![Type](https://img.shields.io/badge/type-custom%20integration-informational)
 
 将一个或多个 [Komari](https://github.com/komari-monitor/komari) 服务器监控面板接入
@@ -13,8 +14,9 @@
 限额和 Ping 统计用于仪表盘、历史记录与自动化。
 
 > [!WARNING]
-> 当前版本为 `0.2.0-alpha.1`，适合测试和提前体验，尚未通过 HACS 发布，也不是
-> Home Assistant 或 Komari 官方集成。升级前请备份 Home Assistant 配置。
+> 当前版本为 `0.2.0-alpha.1`，适合测试和提前体验。它可以作为 HACS 自定义仓库
+> 安装，但尚未收录到 HACS 默认仓库，也不是 Home Assistant 或 Komari 官方集成。
+> 升级前请备份 Home Assistant 配置。
 
 ## 目录
 
@@ -131,8 +133,19 @@ Container 用户应使用映射到容器 `/config` 的宿主机目录。
 
 ### HACS
 
-当前版本尚未包含 `hacs.json`，不能作为 HACS 仓库安装。请勿把仓库手动加入 HACS
-后将安装成功视为受支持流程；HACS 发布将在后续版本单独说明。
+推荐使用 HACS 安装和管理正式发布的版本：
+
+[![Open your Home Assistant instance and open the Komari repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=lucklyduck&repository=Komari&category=integration)
+
+1. 确认 Home Assistant 中已经安装并配置 HACS。
+2. 点击上面的按钮；也可以进入 HACS，打开右上角菜单中的“自定义存储库”。
+3. 填写 `https://github.com/lucklyduck/Komari`，类别选择“集成”。
+4. 打开 Komari 仓库并下载需要的 GitHub Release 版本。
+5. 重启 Home Assistant，然后在“设置 → 设备与服务 → 添加集成”中搜索 **Komari**。
+
+当前仓库尚未收录到 HACS 默认仓库，因此初次安装需要先添加一次自定义存储库。
+HACS 只负责下载和更新集成代码；面板 URL、API Key 和选项仍在 Home Assistant 的
+Komari 配置流程中管理。
 
 ## 配置
 
@@ -202,6 +215,14 @@ Ping 实体；配置时超过上限会阻止保存，运行中因节点增长超
 
 ## 升级与卸载
 
+### HACS 升级
+
+1. 备份 Home Assistant 配置。
+2. 在 HACS 或 Home Assistant 更新页面安装 Komari 的目标版本。
+3. 重启 Home Assistant，使新版本代码生效。
+4. 在集成页面确认版本、设备和实体正常；不要删除并重新添加 Config Entry，否则
+   可能失去原有实体历史关联。
+
 ### 手动升级
 
 1. 备份 Home Assistant 配置。
@@ -213,7 +234,8 @@ Ping 实体；配置时超过上限会阻止保存，运行中因节点增长超
 ### 卸载
 
 1. 在“设置 → 设备与服务”中删除所有 Komari Config Entry。
-2. 删除 `<config>/custom_components/komari` 目录。
+2. 若由 HACS 安装，从 HACS 中移除 Komari；手动安装则删除
+   `<config>/custom_components/komari` 目录。
 3. 重启 Home Assistant。
 
 ## 注意事项
@@ -338,7 +360,9 @@ Home Assistant 会为原 Config Entry 发起重新认证。在 Reauth 表单中�
 
 ### Q：可以通过 HACS 安装吗？
 
-当前不可以。项目尚未添加 HACS 发布元数据，请使用手动安装方式。
+可以。当前通过 HACS 自定义存储库发布，请使用仓库地址
+`https://github.com/lucklyduck/Komari` 并选择“集成”类别。项目尚未收录到 HACS
+默认仓库，因此暂时不会直接出现在默认搜索结果中。
 
 ### Q：是否支持 Komari 动态/自定义指标？
 
@@ -350,15 +374,16 @@ Home Assistant 会为原 Config Entry 发起重新认证。在 Reauth 表单中�
 当前版本不包含：
 
 - 动态/自定义指标发现与映射（F16）。
-- HACS 元数据、GitHub Actions 和正式发布自动化。
+- HACS 默认仓库收录。
 - WebSocket、JSON-RPC batch 和完整历史数据导入。
 - Home Assistant 本地账期流量重建。
 
-后续计划依次完成动态指标、HACS 发布支持、完整兼容性矩阵和稳定版本发布。
+后续计划依次完成动态指标、完整兼容性矩阵、稳定版本发布和 HACS 默认仓库收录。
 
 ## 设计文档
 
 - [开发与验收指南](DEVELOPMENT.md)
+- [版本变更记录](CHANGELOG.md)
 - [总体设计与调研](KOMARI_HOME_ASSISTANT_INTEGRATION_PLAN.md)
 - [逐功能代码实现方案](KOMARI_HOME_ASSISTANT_IMPLEMENTATION_PLAN.md)
 - [Komari 官方文档](https://komari-monitor.github.io/komari-document/)

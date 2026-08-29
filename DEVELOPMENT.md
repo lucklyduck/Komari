@@ -51,10 +51,11 @@ Home Assistant 中创建一个服务设备，面板下的每个 Komari 节点创
 
 ## 安装与配置
 
-当前 alpha 版本尚未发布为 HACS 仓库。手动测试时，将
+发布版本可以通过 HACS 自定义存储库
+`https://github.com/lucklyduck/Komari` 安装和升级。开发 checkout 仍应将
 `custom_components/komari` 复制或链接到 Home Assistant 配置目录的
 `custom_components/komari`，重启 Home Assistant，然后在“设置 → 设备与服务”
-中添加 **Komari**。
+中添加 **Komari**；不要用 HACS 下载内容覆盖正在开发的源码链接。
 
 配置表单需要：
 
@@ -106,6 +107,28 @@ bash script/type-check
 bash script/test
 ```
 
+GitHub 的 `Validate` workflow 会在 push、pull request、每周定时任务和手动触发时
+运行 HACS repository validation、Hassfest、Ruff、Pyright 和 Pytest。HACS 与
+Hassfest validation 不使用 ignore 项；出现失败时应修复仓库或集成元数据，不能只为
+发布而跳过检查。
+
+## 版本发布
+
+发布前必须：
+
+1. 同步 `pyproject.toml`、`custom_components/komari/manifest.json`、README 版本
+   徽章、`AI_README.md`、`DEVELOPMENT.md`、测试版本断言和 `CHANGELOG.md`。
+2. 运行本地完整质量门和 `git diff --check`。
+3. 确认 GitHub `Validate` workflow 的 HACS、Hassfest 和 quality jobs 全部通过。
+4. 从待发布提交创建 `v<version>` 标签和完整 GitHub Release；只有标签而没有 Release
+   不作为正式 HACS 发布。
+5. 在全新 Home Assistant 实例中通过 HACS 自定义存储库验证安装、重启、配置、升级
+   和移除。自动化检查通过不能代替该运行时验收。
+
+GitHub 仓库必须保持公开并启用 Issues，同时配置简短 description 和 topics；这些是
+GitHub 仓库设置，不保存在 checkout 中。当前推荐 topics 为 `home-assistant`、
+`hacs`、`komari`、`custom-integration` 和 `server-monitoring`。
+
 启动开发 Home Assistant：
 
 ```bash
@@ -156,9 +179,9 @@ bash script/smoke-public https://monitor.example.com
 
 ## 当前边界
 
-动态/自定义指标发现与映射（F16）、HACS 元数据、远程仓库、许可证和 HA Core
-提交不属于当前阶段。WebSocket、JSON-RPC batch、历史数据全量导入和在 HA 本地
-重建账期流量也不在当前范围内。
+动态/自定义指标发现与映射（F16）、HACS 默认仓库收录和 HA Core 提交不属于当前
+阶段。WebSocket、JSON-RPC batch、历史数据全量导入和在 HA 本地重建账期流量也不在
+当前范围内。
 
 当前为 alpha 开发版本。公开面板只应用于匿名只读兼容性验证；不要在日志、测试
 fixture 或报告中保存面板名称、节点 UUID、地址、任务目标和指标值。生产环境的

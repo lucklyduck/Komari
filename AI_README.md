@@ -86,6 +86,9 @@ Client、Coordinator、快照、面板服务设备和节点设备。多面板隔
 | `tests/fixtures/` | 仅包含脱敏、确定性的 RPC 数据结构 |
 | `tests/manual/` | 三个 Fake Panel 与协议 smoke test |
 | `script/` | WSL/uv 开发、质量门和本地联调入口 |
+| `hacs.json` | HACS 显示名称和最低 Home Assistant 版本 |
+| `.github/workflows/validate.yml` | HACS、Hassfest、Ruff、Pyright 和 Pytest CI |
+| `CHANGELOG.md` | 与 GitHub Release 同步的版本变更记录 |
 
 ## 5. 运行时架构
 
@@ -436,6 +439,10 @@ git diff --check
 - 测试没有公网依赖，fixture 完全脱敏。
 - 工作树只包含本任务范围内的修改。
 
+GitHub `Validate` workflow 在 push、pull request、每周定时任务和手动触发时重复执行
+HACS repository validation、Hassfest 和上述项目质量门。HACS/Hassfest 检查不得通过
+ignore 绕过。CI 通过仍然只属于自动化证据，不代表 HACS 真实安装或面板兼容性通过。
+
 测试应与功能原子出现。根据改动类型至少覆盖：
 
 - 成功、0 值、缺字段、非法结构和未知字段。
@@ -494,16 +501,19 @@ git diff --check
 - `uv.lock`
 - README 徽章和版本文字
 - 测试中的版本断言
-- 变更日志、发布元数据和 Git 标签
+- `hacs.json`、HACS/Hassfest workflow 和仓库公开状态
+- `CHANGELOG.md`、Git 标签和完整 GitHub Release
 
-版本同步后重新运行完整质量门和真实 HA restart 验收。
+版本同步后重新运行完整质量门和真实 HA restart 验收。HACS 发布必须从对应标签创建
+完整 GitHub Release；仅有标签不能作为已完成发布。仓库 description、topics、Issues
+开关和公开可见性属于 GitHub 侧设置，需要在网页或 GitHub API 中单独确认。
 
 ## 20. 当前未实现边界
 
 以下内容不应被误认为当前功能：
 
 - F16 动态/自定义 Metric Definition 发现、选择与映射。
-- HACS 元数据和正式 HACS 安装/升级流程。
+- HACS 默认仓库收录；当前只提供 HACS 自定义存储库。
 - WebSocket 与 JSON-RPC batch。
 - 完整历史时序导入。
 - HA 本地重建权威账期流量。
@@ -528,4 +538,3 @@ Repairs；不要只把 `queryMetrics` 的原始结果直接暴露成实体。
 - [ ] 日志、fixture、diagnostics 和回复中没有敏感信息。
 - [ ] Ruff、格式、Pyright、Pytest、coverage 和 `git diff --check` 已按风险运行。
 - [ ] 已把静态检查、自动化测试、真实 HA、真实面板验证边界分别说明。
-
