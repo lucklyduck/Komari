@@ -2,11 +2,11 @@
 
 > 调研日期：2026-08-26
 >
-> 目标：规划一个支持多 Komari 面板、多节点设备的 Home Assistant 自定义集成。每次添加集成只配置一个面板；用户可重复添加 Komari，建立多个相互独立的 Config Entry，同时监控多个面板。
+> 目标：规划一个支持多 Komari 面板和多节点设备的 Home Assistant 自定义集成。每次添加集成只配置一个面板；用户可重复添加 Komari，建立多个彼此独立的 Config Entry，同时监控多个面板。
 
-## 1. 结论摘要
+## 1. 方案摘要
 
-Komari 集成的正确定位不是在 Home Assistant 中复刻 Komari 仪表盘，而是把 Komari 已采集的“节点状态和关键指标”转成 Home Assistant 的设备、实体和自动化触发条件。
+Komari 集成把面板已采集的节点状态和主要指标转换为 Home Assistant 的设备、实体及自动化触发条件，不复刻 Komari 仪表盘。
 
 按照 Home Assistant 官方术语，目标模型如下：
 
@@ -19,15 +19,15 @@ Komari 集成的正确定位不是在 Home Assistant 中复刻 Komari 仪表盘�
 - 每个 Config Entry 拥有独立 API client、DataUpdateCoordinator、认证信息、Options 和错误状态；一个面板故障不得影响其他面板。
 - 使用 HTTPS `POST /api/rpc2` 轮询。首版不使用 WebSocket，因为 Komari 前端仍需要主动调用状态方法，WebSocket 只是 RPC 传输方式，并不等于状态订阅。
 - 默认每 30 秒更新实时状态；节点清单、版本和能力列表采用低频刷新。
-- 完整目标同时覆盖到期与流量限额、Ping 任务，以及动态/自定义指标；其中 Ping 和动态指标通过用户选择控制实体数量，但不是规划外功能。
-- 默认只读，绝不调用 `admin:exec`、远程终端、数据库执行、增删节点、清理记录等管理接口。
+- 目标范围包括到期与流量限额、Ping 任务以及动态/自定义指标。Ping 和动态指标由用户选择，以控制实体数量。
+- 集成默认只读，不调用 `admin:exec`、远程终端、数据库执行、增删节点、清理记录等管理接口。
 - 首版目标应达到 Home Assistant Integration Quality Scale 的 Bronze 基线，并按 Silver/Gold 所需的重认证、诊断、动态设备和陈旧设备清理进行设计。
 
 ## 2. 调研范围与依据
 
 ### 2.1 Komari 官方能力
 
-[Komari RPC2 文档](https://komari-monitor.github.io/komari-document/dev/rpc)明确推荐使用 `/api/rpc2`，支持 POST 和 WebSocket，最低要求 Komari `>= 1.0.7`，支持匿名访问、Cookie 和 API Key。RPC2 还提供 `rpc.methods`、`rpc.help` 和 `rpc.version`，适合在配置阶段动态探测能力，避免完全依赖版本号判断。
+[Komari RPC2 文档](https://komari-monitor.github.io/komari-document/dev/rpc)推荐使用 `/api/rpc2`。该接口支持 POST 和 WebSocket，最低要求 Komari `>= 1.0.7`，认证方式包括匿名访问、Cookie 和 API Key。配置阶段可调用 `rpc.methods`、`rpc.help` 和 `rpc.version` 探测实际能力，不必只根据版本号判断。
 
 与 Home Assistant 集成直接相关的方法包括：
 
@@ -64,37 +64,37 @@ Komari 集成的正确定位不是在 Home Assistant 中复刻 Komari 仪表盘�
 - `public:getPublicPingTasks`：返回 2 个公开 Ping 任务。
 - `public:queryMetrics` 和 `common:getNodesLatestStatus` 均存在。
 
-这证明 RPC2 路线能够覆盖目标实例。匿名可访问性属于该实例当前配置，集成仍必须支持 API Key 和私有站点场景。
+以上结果确认 RPC2 在该实例上能够提供规划所需的数据。匿名访问由该实例当时的配置决定，集成仍需支持 API Key 和私有站点。
 
-### 2.3 同类服务器监控系统带来的功能启示
+### 2.3 同类服务器监控系统参考
 
-| 系统 | 相关能力 | 对 Komari 集成的启示 |
+| 系统 | 相关能力 | Komari 集成可借鉴之处 |
 | --- | --- | --- |
-| [Beszel](https://beszel.dev/) | 多服务器、容器、CPU/内存/磁盘/带宽/温度告警、SMART、REST API | 核心指标之外，用户最需要的是“离线、资源超限、磁盘健康”等可自动化状态；容器和 SMART 只应在 Komari API 真正提供后加入 |
-| [哪吒监控](https://nezha.wiki/en_US/guide/api) | 节点、分组、服务监控、告警规则、细粒度 PAT scope | 应支持分组/标签信息；长期应推动或优先使用只读、可限定节点范围的 Komari API Key，而不是要求高权限管理令牌 |
+| [Beszel](https://beszel.dev/) | 多服务器、容器、CPU/内存/磁盘/带宽/温度告警、SMART、REST API | 可优先把“离线、资源超限、磁盘健康”等状态用于自动化；只有 Komari API 提供对应数据后，才加入容器和 SMART 功能 |
+| [哪吒监控](https://nezha.wiki/en_US/guide/api) | 节点、分组、服务监控、告警规则、细粒度 PAT scope | 支持分组和标签信息；如果 Komari 提供只读且可限定节点范围的 API Key，应优先使用，避免要求高权限管理令牌 |
 | [Netdata](https://learn.netdata.cloud/api) | 多节点指标、指标上下文、告警、历史聚合和降采样 | 不应把全部时间序列和全部维度变成 HA 实体；采用能力发现、白名单和用户选择，控制实体数量与 Recorder 写入量 |
 | [Uptime Kuma](https://www.home-assistant.io/integrations/uptime_kuma/) | 状态、响应时间、证书到期、1/30/365 日可用率、30 秒更新 | 为节点在线状态、Ping 延迟/丢包和全局故障汇总提供了直接参考 |
 
-### 2.4 Home Assistant 现有集成带来的架构启示
+### 2.4 Home Assistant 现有集成参考
 
 #### Glances
 
-[Glances 官方集成](https://www.home-assistant.io/integrations/glances/)覆盖 CPU、内存、交换空间、文件系统、磁盘 I/O、网络、温度、GPU、RAID、Docker 和 uptime，并使用 `DataUpdateCoordinator` 统一更新实体。其动态创建磁盘、网卡、温度和 GPU 实体的方式值得参考，但 Komari 当前最新状态是节点级汇总，不能虚构分磁盘或分网卡实体。
+[Glances 官方集成](https://www.home-assistant.io/integrations/glances/)覆盖 CPU、内存、交换空间、文件系统、磁盘 I/O、网络、温度、GPU、RAID、Docker 和 uptime，并使用 `DataUpdateCoordinator` 统一更新实体。Komari 可参考其动态创建磁盘、网卡、温度和 GPU 实体的方式，但当前接口只返回节点级汇总，不能创建没有数据来源的分磁盘或分网卡实体。
 
 #### Uptime Kuma
 
-[Uptime Kuma 官方集成](https://www.home-assistant.io/integrations/uptime_kuma/)每 30 秒获取一次数据，为每个 monitor 创建独立设备，提供稳定 unique ID、动态增加 monitor、重认证、诊断和版本迁移。它同时暴露状态、响应时间、可用率与诊断属性。Komari 应复用这些模式，但应把 `online` 表示为 `binary_sensor`，以便直接参与 HA 的条件、分组和告警自动化。
+[Uptime Kuma 官方集成](https://www.home-assistant.io/integrations/uptime_kuma/)每 30 秒获取一次数据，为每个 monitor 创建独立设备，并处理稳定 unique ID、动态新增 monitor、重认证、诊断和版本迁移。Komari 可沿用这些做法，但将 `online` 表示为 `binary_sensor`，以便直接用于 HA 的条件、分组和告警自动化。
 
 #### UniFi Network
 
-[UniFi Network 集成源码](https://github.com/home-assistant/core/tree/dev/homeassistant/components/unifi)体现了“一套控制器连接管理多个设备”的典型模型。Komari 面板与节点也是相同关系，因此每个面板 Config Entry 应创建一个面板 service Device 和多个节点 Devices，而不是为每个节点建立单独的面板登录配置。
+[UniFi Network 集成源码](https://github.com/home-assistant/core/tree/dev/homeassistant/components/unifi)采用一套控制器连接管理多个设备。Komari 面板与节点关系相同，因此每个面板 Config Entry 创建一个面板 service Device 和多个节点 Devices，不为每个节点单独保存面板登录配置。
 
 ## 3. 产品目标与边界
 
 ### 3.1 目标
 
 1. 允许用户重复执行“添加集成”；每次创建一个面板 Config Entry，从而同时监控一个或多个 Komari 面板。
-2. 将节点在线状态、关键资源指标和重要元数据变成可用于仪表盘、历史图表和自动化的实体。
+2. 将节点在线状态、资源指标及到期、限额等元数据转换为可用于仪表盘、历史图表和自动化的实体。
 3. 为每个面板创建一个独立面板 Device，为面板下每个节点创建一个独立节点 Device，并把相关 Entities 归入正确设备。
 4. 自动发现后加入各面板的节点，并只在对应 Config Entry 内处理新增、改名和删除。
 5. 支持匿名公开面板、API Key 私有面板、HTTPS 和自签名证书场景。
@@ -119,7 +119,7 @@ Komari 集成的正确定位不是在 Home Assistant 中复刻 Komari 仪表盘�
 
 [Home Assistant Config Entries 文档](https://developers.home-assistant.io/docs/config_entries_index/)将 Config Entry 定义为由用户通过 UI 创建并由 Home Assistant 持久保存的配置数据；Home Assistant 会对每个 Config Entry 分别调用 `async_setup_entry(hass, entry)`。本项目按以下方式映射：
 
-因此，用户要求中的“每个面板作为单一的集成实例”，在本文和代码中统一采用官方表述：“每个 Komari 面板由一个 Config Entry 表示”。`Integration` 保留用于指整个 `komari` Integration Domain，不用来指某一个已配置面板。
+文中把用户所说的“每个面板作为单一的集成实例”统一表述为“每个 Komari 面板由一个 Config Entry 表示”。`Integration` 只指整个 `komari` Integration Domain，不指某个已配置面板。
 
 | Home Assistant 对象 | 官方模型中的作用 | Komari 目标设计 |
 | --- | --- | --- |
@@ -131,7 +131,7 @@ Komari 集成的正确定位不是在 Home Assistant 中复刻 Komari 仪表盘�
 | Device Registry | 保存设备身份、归属和拓扑 | 每个 Device 只归属一个 Config Entry |
 | Entity Registry | 保存 Entity 的稳定身份与设备关联 | 每个 Entity 关联到面板 Device 或某个节点 Device |
 
-[Home Assistant manifest 文档](https://developers.home-assistant.io/docs/creating_integration_manifest/)说明 `hub` 类型用于向多个设备或服务提供网关的集成，因此 Komari 应在 `manifest.json` 中明确声明：
+[Home Assistant manifest 文档](https://developers.home-assistant.io/docs/creating_integration_manifest/)说明 `hub` 类型适用于向多个设备或服务提供网关的集成。Komari 的 `manifest.json` 声明如下：
 
 ```json
 {
@@ -168,7 +168,7 @@ Komari Integration Domain（komari）
         └── 节点 B-2 Device
 ```
 
-该结构的强制约束：
+该结构需满足以下约束：
 
 - 一个 Config Entry 恰好对应一个 Komari 面板。
 - 一个 Config Entry 恰好创建一个面板 Device。
@@ -218,7 +218,7 @@ KomariRuntimeData
 └── node_cache
 ```
 
-不得把某个面板的 API client、coordinator、节点缓存或认证状态存为 domain 级单例。这样可以保证：
+不得把某个面板的 API client、coordinator、节点缓存或认证状态存为 domain 级单例。各 Config Entry 的运行时应满足：
 
 - 面板 A 超时只会使面板 A 的 Entities unavailable。
 - 面板 A 需要 Reauth 时不会触发面板 B 的 Reauth。
@@ -227,7 +227,7 @@ KomariRuntimeData
 
 ### 4.5 Config Entry、Device 与 Entity 标识
 
-[Home Assistant Config Flow 文档](https://developers.home-assistant.io/docs/core/integration/config_flow/)明确将 URL 列为不适合作为 Config Entry `unique_id` 的来源。Komari 当前公开 API 没有提供稳定的面板实例 UUID，因此目标设计为：
+[Home Assistant Config Flow 文档](https://developers.home-assistant.io/docs/core/integration/config_flow/)将 URL 列为不适合作为 Config Entry `unique_id` 的来源。Komari 当前公开 API 没有稳定的面板实例 UUID，因此按以下方式设计：
 
 - 不把面板 URL 设置为 Config Entry `unique_id`。
 - 将规范化 URL 保存到 Config Entry data，并通过 `_async_abort_entries_match({CONF_URL: normalized_url})` 阻止同一面板被重复添加。
@@ -287,7 +287,7 @@ KomariRuntimeData
 
 ### 5.3 到期与流量限额（目标功能）
 
-认证后 `Client` 可能包含 `expired_at`、`traffic_limit`、`traffic_limit_type`、`billing_cycle`、`auto_renewal` 等字段。建议提供：
+认证后的 `Client` 可能包含 `expired_at`、`traffic_limit`、`traffic_limit_type`、`billing_cycle`、`auto_renewal` 等字段。对应实体如下：
 
 - 到期时间：timestamp sensor。
 - 剩余天数：duration sensor。
@@ -300,7 +300,7 @@ KomariRuntimeData
 
 ### 5.4 Ping 任务（目标功能，按任务选择实体）
 
-集成必须实现 Ping 任务发现、选择、数据获取和实体生命周期。由于任务数量与节点数量相乘可能产生大量实体，不默认创建所有组合；用户应在 Options Flow 中选择需要同步的任务：
+集成必须处理 Ping 任务的发现、选择、数据获取和实体生命周期。任务数与节点数相乘后可能产生大量实体，因此默认不创建所有组合，由用户在 Options Flow 中选择要同步的任务：
 
 - 最近延迟：duration，毫秒。
 - 丢包率：percentage。
@@ -311,7 +311,7 @@ KomariRuntimeData
 
 ### 5.5 动态/自定义指标（目标功能，按指标选择实体）
 
-新版本 Komari 可通过 `public:listMetricDefinitions` 和 `public:queryMetrics`发现指标。目标实例目前返回 21 个定义，包括 `cpu.usage`、`memory.used`、`disk.used`、`net.in.rate`、`ping.latency_ms`、GPU 设备指标等。
+新版本 Komari 可通过 `public:listMetricDefinitions` 和 `public:queryMetrics` 发现指标。目标实例目前返回 21 个定义，包括 `cpu.usage`、`memory.used`、`disk.used`、`net.in.rate`、`ping.latency_ms`、GPU 设备指标等。
 
 实现原则：
 
@@ -321,7 +321,7 @@ KomariRuntimeData
 - 用户在 Options Flow 中显式选择动态指标后再创建实体。
 - 根据指标定义中的 `type` 和 `unit` 映射 device class、state class 和单位。
 - 未识别单位的指标保持普通 measurement，不猜测单位。
-- 标签维度可能导致实体爆炸，应设置总数上限并提供过滤。
+- 标签维度可能生成大量实体，应设置总数上限并提供过滤。
 
 ## 6. 数据更新设计
 
@@ -329,31 +329,31 @@ KomariRuntimeData
 
 这里的“一个 coordinator”是指每个 Config Entry 各有一个 coordinator。多个面板不得共用一次状态请求、更新成功标志或节点数据快照。Home Assistant 加载多个 Komari Config Entries 时，应并行且相互独立地运行多个 coordinator。
 
-建议调度：
+调度周期：
 
 | 数据 | 默认周期 | 说明 |
 | --- | --- | --- |
-| 最新节点状态 | 30 秒 | Options 可设 15～300 秒；小于 15 秒不推荐 |
+| 最新节点状态 | 30 秒 | Options 可设 15～300 秒；不接受低于 15 秒的配置 |
 | 节点清单 | 10 分钟 | 也可在每 20 次状态更新后刷新一次 |
 | 面板版本、公开设置、RPC 方法 | 6 小时或重载时 | 版本变化后重新探测能力 |
 | Ping 聚合 | 5 分钟 | 只请求用户选择的 Ping 任务 |
 | 自定义指标窗口统计 | 5～15 分钟 | 只请求用户选择的指标和标签 |
 
-关键行为：
+错误与状态处理：
 
 - 首次刷新失败时让 HA 按 `ConfigEntryNotReady` 机制重试。
 - 网络、超时、5xx、JSON 解析错误转换为 `UpdateFailed`。
 - API Key 失效或权限拒绝转换为 `ConfigEntryAuthFailed`，启动 Reauth Flow。
 - 可选方法返回 `Method not found` 时只禁用对应能力，不让整个集成离线。
 - 面板整体请求失败时，所有实体 unavailable；单个节点 `online=false` 时，连接实体保持可用并显示 off，其动态数值实体 unavailable，最后采集时间保持可用。
-- 使用统一超时，建议连接 10 秒、总请求 20 秒，并复用 Home Assistant 注入的 `aiohttp.ClientSession`。
+- 统一使用 10 秒连接超时和 20 秒总请求超时，并复用 Home Assistant 注入的 `aiohttp.ClientSession`。
 - 支持 `always_update=False` 的前提是规范化数据模型可正确比较，减少没有变化时的状态写入。
 
 ## 7. 配置与用户体验
 
 ### 7.1 Config Flow
 
-每次从 Home Assistant UI 添加 Komari 都只处理一个面板，并创建一个新的 Config Entry。完成后，用户可以再次添加 Komari 来配置另一个面板。
+每次从 Home Assistant UI 添加 Komari 时，只配置一个面板并创建一个 Config Entry。用户可再次添加 Komari，配置其他面板。
 
 首次配置字段：
 
@@ -387,7 +387,7 @@ KomariRuntimeData
 
 ### 7.3 Options Flow
 
-建议选项：
+Options Flow 提供：
 
 - 实时状态更新周期。
 - 到期/流量限额实体的启用策略；API 提供数据时默认启用到期、剩余天数和流量使用率。
@@ -407,7 +407,7 @@ KomariRuntimeData
 
 ## 8. 认证与安全
 
-[Komari API 文档](https://komari-monitor.github.io/komari-document/dev/api.html)说明 API Key 使用 Bearer Authentication。规划应遵守以下原则：
+[Komari API 文档](https://komari-monitor.github.io/komari-document/dev/api.html)说明 API Key 使用 Bearer Authentication。认证按以下规则处理：
 
 - 优先允许匿名只读接入公开面板。
 - 私有面板或隐藏节点使用 `Authorization: Bearer <API_KEY>`。
@@ -415,14 +415,14 @@ KomariRuntimeData
 - API Key 只存入 Config Entry data，不写日志、不放状态属性、不包含在 diagnostics。
 - Diagnostics 还应脱敏 Cookie、Token、IP、私有备注、请求头和可能包含敏感信息的 RPC error data。
 - TLS 验证默认开启。允许用户为自签名部署关闭校验，但在 UI 中给出风险提示，不能在代码中静默 `verify=False`。
-- 当前 Komari API Key 权限可能高于 HA 所需范围。集成本身必须保持只读，并在文档中建议为 HA 使用独立 Key；未来若 Komari提供 scoped token，应迁移到 node/read、metrics/read、ping/read 等最小权限。
+- 当前 Komari API Key 的权限可能高于 HA 所需范围。集成本身必须保持只读，文档说明单独创建 HA 专用 Key 可以降低风险；如果 Komari 以后提供 scoped token，则改用 node/read、metrics/read、ping/read 等最小权限。
 - 禁止把 `admin:*` 方法做成 HA service/action，即使用户提供的 Key 有权限。
 
 ## 9. 动态节点与生命周期
 
 [Home Assistant stale-devices 规则](https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/stale-devices/)要求中心系统删除设备后，集成能处理陈旧设备。
 
-建议策略：
+处理规则：
 
 - 每个 Config Entry 只对自己的完整节点清单计算新增、保留和缺失节点。
 - 新节点自动创建设备和核心实体，无需重载 Home Assistant。
@@ -445,7 +445,7 @@ Home Assistant Recorder 会从集成启用后开始保存实体状态。Komari �
 - 优先调用服务端聚合/降采样能力，并限制 `max_points`。
 - 如果 API 不支持某个窗口或指标，不在 HA 端下载海量原始点后自行长期聚合。
 
-## 11. 推荐代码结构
+## 11. 代码结构
 
 ```text
 custom_components/komari/
@@ -483,9 +483,9 @@ README.md
 
 自 Home Assistant 2026.8 的官方自定义集成本地化规则起，自定义集成不使用 Core 构建流程专用的 `strings.json`；英文与中文文本应直接完整写入 `translations/en.json` 和 `translations/zh-Hans.json`。
 
-首个 HACS 版本可以暂时把 API 客户端放在 `api.py`。若以后提交 Home Assistant Core，应将通信层提取为独立、全异步、严格类型化的 PyPI 库，并允许注入 Home Assistant 的 ClientSession；这符合 Core 对依赖透明度和 Platinum 异步实现的方向。
+首个 HACS 版本可以暂时把 API 客户端放在 `api.py`。如果以后提交 Home Assistant Core，则把通信层提取为独立、全异步、严格类型化的 PyPI 库，并允许注入 Home Assistant 的 ClientSession。
 
-运行时类型应明确表达“一条 Config Entry 对应一个面板运行时”：
+运行时类型表示“一条 Config Entry 对应一个面板运行时”：
 
 ```python
 @dataclass
@@ -515,7 +515,7 @@ type KomariConfigEntry = ConfigEntry[KomariRuntimeData]
 
 ## 13. 故障处理与诊断
 
-Diagnostics 建议包含：
+Diagnostics 包含：
 
 - 集成版本、HA 版本、Komari 版本、RPC 版本。
 - 已发现方法名列表或已启用 capability 列表。
@@ -564,7 +564,7 @@ Diagnostics 建议包含：
 - 新增、改名、删除节点后设备注册表行为正确。
 - HA 重启后无重复设备或实体。
 
-静态测试和 mock API 测试不能替代真实 Komari/HA 运行验证；发布前至少要完成一个公开实例和一个需要认证的私有实例测试。
+静态测试和 mock API 测试不能替代真实 Komari/HA 运行验证。发布前至少测试一个公开实例和一个需要认证的私有实例。
 
 ## 15. 分阶段路线图
 
@@ -588,7 +588,7 @@ Diagnostics 建议包含：
 - 中英文翻译、README、HACS 元数据。
 - 基础单元测试、卸载和异常恢复。
 
-P1～P3 共同构成完整目标范围；分阶段仅表示实施顺序，不表示 P2/P3 功能属于规划外增强。
+P1～P3 都在目标范围内，阶段划分只表示实施顺序。
 
 ### P2：稳定性、到期流量与 Ping
 
@@ -626,21 +626,21 @@ P1～P3 共同构成完整目标范围；分阶段仅表示实施顺序，不表
 
 ### 16.2 完整目标完成定义
 
-完整目标除满足基础里程碑外，还必须满足：
+完整目标还需满足：
 
 - 每个面板分别保存和应用自己的轮询周期、到期流量选项、Ping 任务和动态指标选择。
 - 到期时间、剩余天数、流量限额、计费口径流量和流量使用率能够按 API 数据正确创建、更新和移除。
 - `traffic_limit_type` 的 `sum/max/min/up/down` 五种计算口径均有自动化测试。
-- 能发现 Ping 任务，用户可以选择任务，并获得节点级延迟、丢包及支持的窗口统计实体。
+- 能发现 Ping 任务，并为用户选择的任务创建节点级延迟、丢包及支持的窗口统计实体。
 - Ping 任务新增、改名、删除或取消选择后，不产生重复和永久陈旧实体。
 - 能发现动态指标定义，用户可以选择指标和标签，且单位、类型、可用性和 unique ID 映射稳定。
 - 动态指标与内置核心指标正确去重，并限制实体总量、查询点数和请求频率。
 - Komari 旧版本缺少 Ping 聚合或动态指标方法时，核心监控仍可运行，并在 Options/Diagnostics 中明确显示能力不可用。
 - 到期、流量、Ping 和动态指标均完成真实 Komari/HA 联调，而不只通过 fixture 或 mock 验证。
 
-## 17. 最终建议
+## 17. 实施顺序
 
-实施应先完成“一个面板、多个节点、当前状态、可靠自动化”这条最短闭环，再完成其余目标功能。优先级顺序为：
+实施时先打通一个面板、多节点、当前状态和自动化，再完成其余功能。顺序如下：
 
 1. 稳定身份与设备拓扑。
 2. 在线状态和核心资源实体。
@@ -648,7 +648,7 @@ P1～P3 共同构成完整目标范围；分阶段仅表示实施顺序，不表
 4. 到期/流量和 Ping。
 5. 动态指标与历史窗口。
 
-上述五项都属于完整目标范围。按此顺序实现，既能尽早形成可运行版本，也能避免一开始陷入 Komari 管理 API、海量历史数据和远程控制的安全与维护成本。
+上述五项都属于目标范围。这个顺序可以先交付可运行版本，同时把 Komari 管理 API、海量历史数据和远程控制带来的安全与维护工作排除在初期开发之外。
 
 ## 参考资料
 

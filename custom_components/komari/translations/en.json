@@ -44,12 +44,12 @@
       "invalid_url": "Enter a valid HTTP or HTTPS panel URL without user information, a query, or a fragment.",
       "not_confirmed": "Confirm the panel address change before saving.",
       "unsupported_panel": "This panel does not expose the RPC2 methods required by the integration.",
-      "unknown": "An unexpected error occurred."
+      "unknown": "Komari could not be configured."
     },
     "abort": {
       "already_configured": "This Komari panel is already configured.",
-      "reauth_successful": "The API key was updated successfully.",
-      "reconfigure_successful": "The Komari panel was reconfigured successfully."
+      "reauth_successful": "The API key was updated.",
+      "reconfigure_successful": "The Komari panel was reconfigured."
     }
   },
   "options": {
@@ -64,7 +64,7 @@
       },
       "entities": {
         "title": "Optional node entities",
-        "description": "Choose which metadata-based entity families are exposed.",
+        "description": "Choose which metadata entities Home Assistant creates.",
         "data": {
           "enable_expiry_entities": "Expiry and renewal entities",
           "enable_traffic_entities": "Traffic limit entities"
@@ -79,7 +79,7 @@
       },
       "ping_stats": {
         "title": "Ping statistics",
-        "description": "Latest latency and loss are the recommended defaults. Advanced statistics create additional entities.",
+        "description": "Latest latency and packet loss are selected by default. Advanced statistics create additional entities.",
         "data": {
           "ping_stat_keys": "Statistics"
         }
@@ -276,16 +276,16 @@
   },
   "issues": {
     "selected_ping_task_missing": {
-      "title": "A selected Komari Ping task is missing",
-      "description": "The Komari panel **{entry_title}** no longer lists {missing_count} selected Ping task(s). Open the integration options and remove the missing selection, or restore the task on the panel."
+      "title": "Selected Komari Ping tasks unavailable",
+      "description": "The Komari panel **{entry_title}** no longer lists {missing_count} of the selected Ping tasks. Remove them in the integration options or restore them on the panel."
     },
     "ping_entity_limit_exceeded": {
       "title": "Komari Ping entity limit exceeded",
-      "description": "The current results for **{entry_title}** would create {entity_count} Ping entities, above the per-panel limit of {entity_limit}. Reduce the selected tasks or statistics in the integration options. Excess entities are not created."
+      "description": "**{entry_title}** would create {entity_count} Ping entities, above the per-panel limit of {entity_limit}. Reduce the selected tasks or statistics in the integration options. Excess entities are not created."
     },
     "tls_verification_disabled": {
       "title": "TLS certificate verification is disabled for Komari",
-      "description": "The HTTPS connection for **{entry_title}** does not verify the server certificate. Reconfigure the integration and enable TLS verification unless this is an intentional, temporary test setup."
+      "description": "The HTTPS connection for **{entry_title}** does not verify the server certificate. If this is not a temporary test setup, reconfigure the integration and enable TLS verification."
     }
   }
 }

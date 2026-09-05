@@ -1,9 +1,9 @@
 # Komari Home Assistant 开发与验收指南
 
-本文档由项目原 README 整理而来，面向集成开发、协议调试和本地验收。面向普通用户
-的安装、配置和常见问题请先阅读 [README](README.md)。
+本文档说明集成开发、协议调试和本地验收流程。安装、配置和常见问题见
+[README](README.md)。
 
-当前开发分支目标版本为 `0.2.0-alpha.1`，在 P1 多面板监控 MVP 上增加了可配置
+本文对应版本 `0.2.0-alpha.1`，在 P1 多面板监控 MVP 上增加了可配置
 调度、到期与流量限额、Ping 统计、生命周期清理、Diagnostics 和 Repairs。
 
 每次“添加集成”对应一个独立 Komari 面板（一个 Config Entry）。每个面板在
@@ -126,7 +126,7 @@ Hassfest validation 不使用 ignore 项；出现失败时应修复仓库或集�
    和移除。自动化检查通过不能代替该运行时验收。
 
 GitHub 仓库必须保持公开并启用 Issues，同时配置简短 description 和 topics；这些是
-GitHub 仓库设置，不保存在 checkout 中。当前推荐 topics 为 `home-assistant`、
+GitHub 仓库设置，不保存在 checkout 中。topics 可设为 `home-assistant`、
 `hacs`、`komari`、`custom-integration` 和 `server-monitoring`。
 
 启动开发 Home Assistant：
@@ -140,7 +140,7 @@ Web UI 通常位于 <http://127.0.0.1:8123>。
 
 ## 三面板本地验收
 
-第一个 WSL 终端启动三个只监听本机、数据完全脱敏的假 Komari 面板：
+第一个 WSL 终端启动三个只监听本机、使用脱敏测试数据的假 Komari 面板：
 
 ```bash
 bash script/fake-panels
@@ -177,7 +177,7 @@ bash script/smoke-public https://monitor.example.com
 该命令只执行 RPC2 bootstrap 验证，不打印或持久化面板名称、节点 UUID、地址或
 指标值。
 
-## 当前边界
+## 暂不支持
 
 动态/自定义指标发现与映射（F16）、HACS 默认仓库收录和 HA Core 提交不属于当前
 阶段。WebSocket、JSON-RPC batch、历史数据全量导入和在 HA 本地重建账期流量也不在

@@ -7,7 +7,7 @@
 
 ## 1. 文档目的
 
-本文件把功能调研报告转换成可执行的代码构建路径。它只描述“如何实现”，不重复论证产品需求。
+本文件把功能调研报告拆成可执行的代码任务，只描述实现方法，不再重复产品需求。
 
 集成必须遵守以下固定结构：
 
@@ -19,7 +19,7 @@
 - 面板下的每个 Komari 节点创建一个独立 Device，并通过 `via_device_id` 指向本 Config Entry 的面板 Device。
 - 面板实体只属于面板 Device；节点实体只属于对应节点 Device。
 
-本文把功能拆成 F01～F23。每个功能单元都给出目标、代码落点、实现流程、边界条件、测试和完成标准，可直接作为 Issue、提交或开发阶段的拆分依据。
+本文将功能分为 F01～F23。每个单元列出目标、代码位置、实现流程、边界条件、测试和完成标准，可据此拆分 Issue、提交和开发阶段。
 
 ## 2. 实施原则与验证边界
 
@@ -119,7 +119,7 @@ pyproject.toml
 
 ## 4. 核心数据模型
 
-实体和协调器都依赖统一快照，建议先固定下列模型，再开始平台代码：
+实体和协调器都依赖统一快照。先固定下列模型，再编写平台代码：
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -225,7 +225,7 @@ F01 工程骨架
  └─ F23 HACS 打包、发布与 Core 迁移准备
 ```
 
-推荐里程碑：
+阶段划分：
 
 | 阶段 | 功能 | 阶段出口 |
 | --- | --- | --- |
@@ -385,7 +385,7 @@ class KomariApiClient:
 5. 校验 HTTP 状态、JSON Content、`jsonrpc`、响应 ID、`result/error` 互斥关系。
 6. 将远端错误码和 HTTP 状态映射到 F02 的异常类型。
 
-建议总超时 20 秒、连接超时 10 秒，由构造参数注入以便测试。Client 内增加 `asyncio.Lock` 或小型 Semaphore，防止 Options 刷新、手动重载和 Coordinator 同时对面板发起大量请求。
+总超时设为 20 秒，连接超时设为 10 秒，并通过构造参数注入以便测试。Client 内增加 `asyncio.Lock` 或小型 Semaphore，防止 Options 刷新、手动重载和 Coordinator 同时向面板发起大量请求。
 
 ### 边界条件
 
@@ -447,7 +447,7 @@ supports_dynamic_metrics = {
 
 节点清单选择策略：
 
-- 有 API Key 且 `common:getNodes` 可用：优先认证接口，以获得完整节点元数据。
+- 有 API Key 且 `common:getNodes` 可用：优先认证接口，以读取完整节点元数据。
 - 否则使用 `public:getNodesInformation`。
 - 最新状态优先使用 `common:getNodesLatestStatus`；如果匿名权限不允许，必须根据真实方法列表和响应决定是否有公开替代接口，不能臆造方法名。
 
@@ -1041,7 +1041,7 @@ class KomariPingStats:
 - `minimum_latency`、`maximum_latency`、`average_latency`、`p95_latency`：ms，默认禁用其中的详细统计，避免实体过多。
 - `ping_problem`：problem binary sensor；只有服务端有明确失败/丢包阈值语义，或集成定义并公开可配置阈值时创建。
 
-推荐 unique ID：
+unique ID 格式：
 
 ```text
 {entry_id}:node:{node_uuid}:ping:{task_id}:{stat_key}
@@ -1083,7 +1083,7 @@ class KomariPingStats:
 
 ### 目标
 
-在不硬编码所有未来指标的前提下，安全地发现、选择和展示 Komari Metric Definitions 与查询结果。
+发现、选择并显示 Komari Metric Definitions 与查询结果，同时避免硬编码未来指标。
 
 ### 代码落点
 
@@ -1471,7 +1471,7 @@ async def async_get_device_diagnostics(hass, entry, device) -> dict[str, Any]: .
 README 必须说明：
 
 1. 安装和多面板添加方式。
-2. API Key 权限与 TLS 建议。
+2. API Key 权限与 TLS 设置。
 3. 每个面板/节点的 Device 模型。
 4. 核心实体、默认禁用实体和 Options。
 5. 到期、流量口径及 Agent 重启复位限制。
@@ -1612,9 +1612,9 @@ README 必须说明：
 - `entry.entry_id` 隔离面板，node UUID/task ID/metric key 隔离远端对象。
 - 名称、URL、IP、单位、版本和当前值不参与 unique ID。
 
-## 30. 推荐开发任务拆分
+## 30. 开发任务拆分
 
-为了便于审核和回退，建议按以下提交边界实施：
+以下提交边界便于审核和回退：
 
 1. `build: scaffold komari custom integration`
 2. `feat: add typed rpc2 client and response models`
@@ -1687,8 +1687,8 @@ P1 完成前检查：
 - [Contributing an integration to Core](https://developers.home-assistant.io/docs/core/integration/contributing_to_core/)
 - [Home Assistant Device Registry source](https://github.com/home-assistant/core/blob/dev/homeassistant/helpers/device_registry.py)
 
-## 33. 结论
+## 33. 实施概要
 
-实施顺序应从身份和运行时边界开始，而不是先堆传感器。F01～F09 固定 RPC、Config Entry、面板/节点 Device 与实体 identity；F10～F16 在这一稳定骨架上分别加入面板状态、核心指标、到期流量、Ping 和动态指标；F17～F23 负责调度、维护、诊断、测试和发布。
+先确定身份和运行时边界，再添加传感器。F01～F09 固定 RPC、Config Entry、面板/节点 Device 与实体 identity；F10～F16 加入面板状态、核心指标、到期流量、Ping 和动态指标；F17～F23 处理调度、维护、诊断、测试和发布。
 
-只要每个功能单元都同时完成代码、异常边界、注册表行为和测试，就能在不破坏多面板隔离的前提下逐步交付完整 Komari Home Assistant 集成。
+每个功能单元需同时完成代码、异常边界、注册表行为和测试，并保持多面板隔离。

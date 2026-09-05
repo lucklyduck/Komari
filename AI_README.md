@@ -1,7 +1,7 @@
 # AI 开发说明：Komari for Home Assistant
 
-本文档面向接手本仓库的 AI 编码代理。开始分析、修改、测试或配置集成前，请完整
-阅读本文，并以当前检出的源码和测试为最终事实来源。
+本文档供接手本仓库的 AI 编码代理使用。开始分析、修改、测试或配置集成前，先读完
+本文；判断当前行为时，以检出的源码和测试为准。
 
 ## 1. 项目速览
 
@@ -488,7 +488,7 @@ ignore 绕过。CI 通过仍然只属于自动化证据，不代表 HACS 真实�
 
 1. 在 `const.py` 和 `options.py` 定义默认值、范围和类型回退。
 2. 在 `config_flow.py` 增加步骤、验证和实体数量预览。
-3. 确保保存只重载当前 Entry 一次。
+3. 确认保存后只重载当前 Entry 一次。
 4. 评估并实现 Config Entry minor/major migration。
 5. 测试旧 Entry、重复迁移、非法存储值和多 Entry 隔离。
 
@@ -508,9 +508,9 @@ ignore 绕过。CI 通过仍然只属于自动化证据，不代表 HACS 真实�
 完整 GitHub Release；仅有标签不能作为已完成发布。仓库 description、topics、Issues
 开关和公开可见性属于 GitHub 侧设置，需要在网页或 GitHub API 中单独确认。
 
-## 20. 当前未实现边界
+## 20. 尚未实现的功能
 
-以下内容不应被误认为当前功能：
+当前版本不包含以下功能：
 
 - F16 动态/自定义 Metric Definition 发现、选择与映射。
 - HACS 默认仓库收录；当前只提供 HACS 自定义存储库。
@@ -523,7 +523,7 @@ ignore 绕过。CI 通过仍然只属于自动化证据，不代表 HACS 真实�
 白名单、series/点数/实体上限、Options 过滤、TTL、三次缺失清理、Diagnostics 和
 Repairs；不要只把 `queryMetrics` 的原始结果直接暴露成实体。
 
-## 21. AI 交付检查表
+## 21. 交付前检查
 
 完成任务前逐项确认：
 

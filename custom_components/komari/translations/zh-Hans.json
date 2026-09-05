@@ -44,7 +44,7 @@
       "invalid_url": "请输入不含用户信息、查询参数和片段的有效 HTTP 或 HTTPS 面板地址。",
       "not_confirmed": "请确认修改面板地址后再保存。",
       "unsupported_panel": "该面板未提供集成所需的 RPC2 方法。",
-      "unknown": "发生未知错误。"
+      "unknown": "Komari 配置失败。"
     },
     "abort": {
       "already_configured": "该 Komari 面板已经配置。",
@@ -56,7 +56,7 @@
     "step": {
       "monitoring": {
         "title": "监控周期",
-        "description": "这些轮询周期只作用于当前 Komari 面板。",
+        "description": "下列轮询周期仅适用于当前 Komari 面板。",
         "data": {
           "scan_interval": "核心状态周期",
           "ping_interval": "Ping 统计周期"
@@ -64,7 +64,7 @@
       },
       "entities": {
         "title": "可选节点实体",
-        "description": "选择需要公开的元数据实体组。",
+        "description": "选择要在 Home Assistant 中创建的元数据实体。",
         "data": {
           "enable_expiry_entities": "到期与续费实体",
           "enable_traffic_entities": "流量限额实体"
@@ -79,7 +79,7 @@
       },
       "ping_stats": {
         "title": "Ping 统计项",
-        "description": "建议保留最新延迟和丢包率；高级统计会创建额外实体。",
+        "description": "默认选择最新延迟和丢包率；高级统计会创建额外实体。",
         "data": {
           "ping_stat_keys": "统计项"
         }
@@ -277,15 +277,15 @@
   "issues": {
     "selected_ping_task_missing": {
       "title": "已选择的 Komari Ping 任务缺失",
-      "description": "Komari 面板 **{entry_title}** 已不再列出所选任务中的 {missing_count} 个。请打开集成选项移除缺失任务，或在面板中恢复这些任务。"
+      "description": "Komari 面板 **{entry_title}** 不再列出其中 {missing_count} 个已选任务。请在集成选项中移除缺失任务，或在面板中恢复这些任务。"
     },
     "ping_entity_limit_exceeded": {
       "title": "Komari Ping 实体数量超过上限",
-      "description": "**{entry_title}** 的当前结果会创建 {entity_count} 个 Ping 实体，超过每个面板 {entity_limit} 个的上限。请在集成选项中减少任务或统计项；超出部分不会创建。"
+      "description": "**{entry_title}** 将创建 {entity_count} 个 Ping 实体，超过每个面板 {entity_limit} 个的上限。请在集成选项中减少任务或统计项；超出部分不会创建。"
     },
     "tls_verification_disabled": {
       "title": "Komari 的 TLS 证书验证已关闭",
-      "description": "**{entry_title}** 的 HTTPS 连接不会验证服务器证书。除非这是有意设置的临时测试环境，否则请重新配置集成并启用 TLS 验证。"
+      "description": "**{entry_title}** 的 HTTPS 连接不会验证服务器证书。如果这不是临时测试环境，请重新配置集成并启用 TLS 验证。"
     }
   }
 }
