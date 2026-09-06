@@ -15,9 +15,10 @@
 统计均可用于仪表盘、历史记录与自动化。
 
 > [!WARNING]
-> 最新已发布版本为 `0.2.0-alpha.1`，适合测试。当前 checkout 正在准备 `v0.3.0`，
-> 尚未创建 Release。它可以作为 HACS 自定义仓库安装，但尚未收录到 HACS 默认仓库，
-> 也不是 Home Assistant 或 Komari 官方集成。升级前请备份 Home Assistant 配置。
+> 最新已发布版本为 `0.2.0-alpha.1`，适合测试。当前 checkout 的候选版本为
+> `0.3.0-rc.1`，尚未创建 GitHub Prerelease。它可以作为 HACS 自定义仓库安装，但尚未
+> 收录到 HACS 默认仓库，也不是 Home Assistant 或 Komari 官方集成。升级前请备份
+> Home Assistant 配置。
 
 ## 目录
 

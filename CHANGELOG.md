@@ -6,7 +6,7 @@ The project follows Semantic Versioning while it remains a custom integration. V
 before `1.0.0` may still introduce breaking changes, which will be called out explicitly in
 the release notes.
 
-## [Unreleased]
+## [0.3.0-rc.1] - 2026-09-07
 
 ### Added
 

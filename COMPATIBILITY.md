@@ -1,10 +1,10 @@
 # Komari Home Assistant compatibility evidence
 
-Last updated: 2026-09-06
+Last updated: 2026-09-07
 
-This file is the release evidence ledger for `v0.3.0`. It deliberately separates local
-automation from a real Home Assistant/Komari run. A row marked **Pending** is not evidence
-of compatibility.
+This file is the release evidence ledger for `v0.3.0-rc.1` and the eventual stable `v0.3.0`.
+It deliberately separates local automation from a real Home Assistant/Komari run. A row
+marked **Pending** is not evidence of compatibility.
 
 ## Evidence levels
 

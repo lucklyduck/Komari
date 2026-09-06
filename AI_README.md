@@ -11,7 +11,7 @@
 | 集成类型 | Home Assistant 自定义 `hub` 集成 |
 | I/O 模型 | `cloud_polling`，全异步，只读 JSON-RPC 2.0 |
 | 最新已发布版本 | `0.2.0-alpha.1` |
-| 当前 checkout 目标 | `v0.3.0`（尚未创建 Release） |
+| 当前 checkout 候选版本 | `0.3.0-rc.1`（GitHub Prerelease 待创建） |
 | Home Assistant 基线 | `2026.8.2+` |
 | Komari 基线 | RPC2 `1.0.7+`，实际功能按 `rpc.methods` 探测 |
 | Python | `3.14.x`，开发脚本固定安装 `3.14.6` |

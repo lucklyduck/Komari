@@ -2458,7 +2458,7 @@ async def test_config_and_device_diagnostics_are_structural_and_redacted(
 
     entry_diagnostics = await async_get_config_entry_diagnostics(hass, entry)
     assert entry_diagnostics["versions"] == {
-        "integration": "0.2.0-alpha.1",
+        "integration": "0.3.0-rc.1",
         "komari": "1.2.3",
         "rpc": "2.0",
     }
