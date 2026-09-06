@@ -18,15 +18,20 @@ if TYPE_CHECKING:
 
 from custom_components.komari.api import KomariApiClient
 from custom_components.komari.const import (
+    DYNAMIC_METRIC_METHODS,
+    MAX_METRIC_RESPONSE_BYTES,
     METHOD_COMMON_NODES,
     METHOD_COMMON_PUBLIC_INFO,
     METHOD_COMMON_RECORDS,
     METHOD_COMMON_VERSION,
     METHOD_LATEST_STATUS,
+    METHOD_PING,
     METHOD_PING_METRIC_STATS,
+    METHOD_PUBLIC_METRIC_DEFINITIONS,
     METHOD_PUBLIC_NODES,
     METHOD_PUBLIC_PING_RECORDS,
     METHOD_PUBLIC_PING_TASKS,
+    METHOD_PUBLIC_QUERY_METRICS,
     METHOD_PUBLIC_SETTINGS,
     METHOD_PUBLIC_VERSION,
 )
@@ -40,8 +45,11 @@ from custom_components.komari.exceptions import (
     KomariUnsupportedError,
 )
 from custom_components.komari.models import (
+    KomariMetricSeriesKey,
     TrafficLimitType,
     parse_datetime,
+    parse_metric_definitions,
+    parse_metric_values,
     parse_nodes,
     parse_ping_metric_stats,
     parse_ping_records_stats,
@@ -59,6 +67,13 @@ class FakeResponse:
     def __init__(self, status: int, payload: object) -> None:
         self.status = status
         self._payload = payload
+        encoded = (
+            json.dumps(payload).encode("utf-8")
+            if not isinstance(payload, Exception)
+            else b""
+        )
+        self.content = _FakeContent(encoded)
+        self.content_length: int | None = len(encoded)
 
     async def __aenter__(self) -> Self:
         """Enter the response context."""
@@ -73,6 +88,21 @@ class FakeResponse:
         if isinstance(self._payload, Exception):
             raise self._payload
         return self._payload
+
+
+class _FakeContent:
+    """Byte-stream stand-in used by the bounded Metric response path."""
+
+    def __init__(self, payload: bytes) -> None:
+        """Store a response body that can be read in bounded chunks."""
+        self._payload = payload
+        self._offset = 0
+
+    async def read(self, size: int) -> bytes:
+        """Return the next response chunk."""
+        chunk = self._payload[self._offset : self._offset + size]
+        self._offset += len(chunk)
+        return chunk
 
 
 class FakeSession:
@@ -836,3 +866,377 @@ async def test_metadata_refresh_reprobes_methods_and_panel_versions() -> None:
     assert panel.name == "Fixture panel"
     assert panel.version == "2.0.0"
     assert discovered == frozenset(capabilities)
+
+
+def test_metric_models_canonicalize_supported_wire_shapes() -> None:
+    """Definitions and values preserve only bounded, identity-safe fields."""
+    definitions = parse_metric_definitions(
+        [
+            {
+                "name": "custom.temperature",
+                "description": {"en": "Temperature", "zh": "温度"},
+                "type": "gauge",
+                "unit": "°C",
+                "retention_days": 7,
+                "metadata": {"safe": "value", "ignored": 1},
+            },
+            {
+                "name": "custom.counter",
+                "description": "A count",
+                "type": "counter",
+                "retention_days": 0,
+            },
+        ]
+    )
+    assert definitions["custom.temperature"].description == {
+        "en": "Temperature",
+        "zh": "温度",
+    }
+    assert definitions["custom.temperature"].metadata == {"safe": "value"}
+    assert definitions["custom.counter"].retention_days == 0
+
+    values = parse_metric_values(
+        {
+            "series": [
+                {
+                    "metric_key": "custom.temperature",
+                    "entity_id": NODE_UUID,
+                    "tags": {"zone": "edge", "host": "a"},
+                    "points": [
+                        {
+                            "timestamp": "2026-08-26T00:00:00Z",
+                            "value": 20,
+                            "labels": {"ignored": "yes"},
+                        },
+                        {
+                            "time": "2026-08-26T00:01:00Z",
+                            "value": 21.5,
+                        },
+                    ],
+                },
+                {
+                    "metric_key": "custom.counter",
+                    "entity_id": NODE_UUID,
+                    "tags": {},
+                    "points": [{"ts": "2026-08-26T00:02:00Z", "value": None}],
+                },
+            ]
+        }
+    )
+    temperature_key = KomariMetricSeriesKey(
+        "custom.temperature",
+        NODE_UUID,
+        (("host", "a"), ("zone", "edge")),
+    )
+    assert values[temperature_key].value == 21.5
+    assert values[temperature_key].observed_at == datetime(
+        2026,
+        8,
+        26,
+        0,
+        1,
+        tzinfo=UTC,
+    )
+    assert values[KomariMetricSeriesKey("custom.counter", NODE_UUID, ())].value is None
+
+
+def test_metric_models_reject_unbounded_or_invalid_top_level_shapes() -> None:
+    """A malformed Metric envelope never publishes a partial snapshot."""
+    with pytest.raises(KomariProtocolError):
+        parse_metric_definitions({"definitions": []})
+    with pytest.raises(KomariProtocolError):
+        parse_metric_values({"series": "not-a-list"})
+    with pytest.raises(KomariProtocolError):
+        parse_metric_values(
+            {
+                "series": [
+                    {
+                        "metric_key": "custom.rate",
+                        "entity_id": NODE_UUID,
+                        "tags": {},
+                        "points": [{}] * 129,
+                    }
+                ]
+            }
+        )
+
+
+def test_metric_fixtures_cover_localized_descriptions_and_null_values() -> None:
+    """Sanitized F16 fixtures retain only protocol shapes needed by the tests."""
+    definitions = parse_metric_definitions(load_fixture("metric_definitions.json"))
+    values = parse_metric_values(load_fixture("metric_query.json"))
+
+    assert definitions["custom.rate"].description == {
+        "en": "Fixture rate",
+        "zh-Hans": "固定测试速率",
+    }
+    assert (
+        values[
+            KomariMetricSeriesKey(
+                "custom.rate",
+                NODE_UUID,
+                (("region", "fixture"), ("scope", "node")),
+            )
+        ].value
+        == 12.5
+    )
+    assert values[KomariMetricSeriesKey("custom.empty", NODE_UUID, ())].value is None
+
+
+def test_metric_models_skip_untrusted_points_without_coercion() -> None:
+    """Null is valid, while bool, non-finite, and naive points are ignored."""
+    values = parse_metric_values(
+        {
+            "series": [
+                {
+                    "metric_key": "custom.rate",
+                    "entity_id": NODE_UUID,
+                    "tags": {},
+                    "points": [
+                        {"time": "2026-08-26T00:00:00", "value": 1},
+                        {"time": "2026-08-26T00:01:00Z", "value": True},
+                        {"time": "2026-08-26T00:02:00Z", "value": float("nan")},
+                        {"time": "2026-08-26T00:03:00Z", "value": None},
+                    ],
+                }
+            ]
+        }
+    )
+    key = KomariMetricSeriesKey("custom.rate", NODE_UUID, ())
+    assert values[key].value is None
+    assert values.skipped_point_count == 3
+
+
+async def test_metric_client_uses_only_bounded_documented_query_fields() -> None:
+    """Metric RPC calls never fall back to records or add undeclared parameters."""
+    session = FakeSession(
+        [],
+        rpc_results={
+            METHOD_PUBLIC_METRIC_DEFINITIONS: [
+                {
+                    "name": "custom.rate",
+                    "type": "gauge",
+                    "retention_days": 1,
+                }
+            ],
+            METHOD_PUBLIC_QUERY_METRICS: {
+                "series": [
+                    {
+                        "metric_key": "custom.rate",
+                        "entity_id": NODE_UUID,
+                        "tags": {"region": "edge"},
+                        "points": [{"time": "2026-08-26T00:00:00Z", "value": 12}],
+                    },
+                    {
+                        "metric_key": "custom.rate",
+                        "entity_id": "unknown-node",
+                        "tags": {"region": "edge"},
+                        "points": [{"time": "2026-08-26T00:00:00Z", "value": 13}],
+                    },
+                ]
+            },
+        },
+    )
+    client = make_client(session)
+    definitions = await client.async_get_metric_definitions(DYNAMIC_METRIC_METHODS)
+    values = await client.async_query_metrics(
+        DYNAMIC_METRIC_METHODS,
+        metric_keys=("custom.rate",),
+        entity_ids=(NODE_UUID,),
+        tags={"region": "edge"},
+    )
+
+    assert tuple(definitions) == ("custom.rate",)
+    assert len(values) == 1
+    assert client.last_metric_skipped_series_count == 1
+    assert client.last_metric_skipped_point_count == 0
+    assert session.requests[1]["json"] == {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": METHOD_PUBLIC_QUERY_METRICS,
+        "params": {
+            "metric_keys": ["custom.rate"],
+            "entity_ids": [NODE_UUID],
+            "tags": {"region": "edge"},
+            "hours": 4,
+            "max_points": 1,
+            "aggregation": "last",
+            "fill_empty": False,
+        },
+    }
+    assert all(
+        request["json"]["method"] != METHOD_COMMON_RECORDS
+        for request in session.requests
+    )
+
+
+async def test_metric_client_enforces_capabilities_and_response_limit() -> None:
+    """Optional Metrics reject partial capabilities and oversized responses."""
+    with pytest.raises(KomariUnsupportedError):
+        await make_client(FakeSession([])).async_get_metric_definitions(frozenset())
+
+    response = rpc_result(1, [])
+    response.content_length = MAX_METRIC_RESPONSE_BYTES + 1
+    with pytest.raises(KomariProtocolError, match="size"):
+        await make_client(FakeSession([response])).async_get_metric_definitions(
+            DYNAMIC_METRIC_METHODS
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [{}] * 257,
+        [None],
+        [{"name": "", "type": "gauge"}],
+        [{"name": "custom.rate", "type": "gauge", "retention_days": -1}],
+    ],
+)
+def test_metric_definition_models_fail_closed_for_invalid_entries(
+    payload: object,
+) -> None:
+    """Invalid Definition items cannot turn into a partial discovery snapshot."""
+    with pytest.raises(KomariProtocolError):
+        parse_metric_definitions(payload)
+    with pytest.raises(KomariProtocolError, match="duplicate"):
+        parse_metric_definitions(
+            [
+                {"name": "custom.rate", "type": "gauge"},
+                {"name": "custom.rate", "type": "gauge"},
+            ]
+        )
+
+
+def test_metric_value_models_skip_invalid_series_and_points_safely() -> None:
+    """Malformed series are counted while a newer finite point wins."""
+    values = parse_metric_values(
+        {
+            "series": [
+                None,
+                {
+                    "metric_key": "custom.rate",
+                    "entity_id": NODE_UUID,
+                    "tags": {"bad": 1},
+                    "points": [],
+                },
+                {
+                    "metric_key": "custom.rate",
+                    "entity_id": NODE_UUID,
+                    "tags": {},
+                    "points": [
+                        None,
+                        {"time": "not-a-time", "value": 1},
+                        {"time": "2026-08-26T00:00:00Z", "value": "12"},
+                        {"time": "2026-08-26T00:01:00Z", "value": 2},
+                    ],
+                },
+            ]
+        }
+    )
+    key = KomariMetricSeriesKey("custom.rate", NODE_UUID, ())
+    assert values[key].value == 2
+    assert values.skipped_series_count == 2
+    assert values.skipped_point_count == 3
+
+    with pytest.raises(KomariProtocolError, match="series limit"):
+        parse_metric_values({"series": [{}] * 513})
+    with pytest.raises(KomariProtocolError, match="point limit"):
+        parse_metric_values(
+            {
+                "series": [
+                    {
+                        "metric_key": "custom.rate",
+                        "entity_id": NODE_UUID,
+                        "tags": {},
+                        "points": [{}] * 129,
+                    }
+                ]
+            }
+        )
+
+
+async def test_metric_client_short_circuits_empty_and_rejects_unsafe_inputs() -> None:
+    """Validation stops unsafe Metric requests before they reach a panel."""
+    session = FakeSession([])
+    client = make_client(session)
+    assert (
+        await client.async_query_metrics(
+            DYNAMIC_METRIC_METHODS,
+            metric_keys=(),
+            entity_ids=(NODE_UUID,),
+            tags={},
+        )
+        == {}
+    )
+    assert client.last_metric_skipped_series_count == 0
+    assert client.last_metric_skipped_point_count == 0
+
+    invalid_inputs = (
+        {"metric_keys": tuple(f"custom.{index}" for index in range(9))},
+        {"entity_ids": ("",)},
+        {"tags": {"x" * 65: "edge"}},
+        {"tags": {"x": "y" * 4096}},
+        {"tags": {str(index): "y" * 256 for index in range(16)}},
+        {"aggregation": "avg"},
+    )
+    unsafe_query = cast("Any", client.async_query_metrics)
+    for invalid in invalid_inputs:
+        arguments: dict[str, object] = {
+            "metric_keys": ("custom.rate",),
+            "entity_ids": (NODE_UUID,),
+            "tags": {},
+        }
+        arguments.update(invalid)
+        with pytest.raises(KomariProtocolError):
+            await unsafe_query(DYNAMIC_METRIC_METHODS, **arguments)
+    with pytest.raises(KomariUnsupportedError):
+        await client.async_query_metrics(
+            frozenset(),
+            metric_keys=("custom.rate",),
+            entity_ids=(NODE_UUID,),
+            tags={},
+        )
+    with pytest.raises(ValueError, match="positive"):
+        await client.async_call(METHOD_PING, max_response_bytes=0)
+    assert session.requests == []
+
+    common_nodes_session = FakeSession(
+        [],
+        rpc_results={METHOD_COMMON_NODES: {NODE_UUID: {"uuid": NODE_UUID}}},
+    )
+    assert tuple(
+        await make_client(common_nodes_session).async_get_nodes(
+            frozenset({METHOD_COMMON_NODES})
+        )
+    ) == (NODE_UUID,)
+    assert (
+        await make_client(FakeSession([])).async_get_ping_stats(
+            frozenset({METHOD_PING_METRIC_STATS}),
+            (),
+            (),
+            hours=1,
+            max_points=1,
+        )
+        == {}
+    )
+    with pytest.raises(KomariUnsupportedError):
+        KomariApiClient._select_method(frozenset(), "preferred", "fallback")
+
+
+async def test_metric_client_rejects_streamed_oversize_and_invalid_json() -> None:
+    """The streaming size guard works even when a server omits Content-Length."""
+    oversize = rpc_result(1, [])
+    oversize.content_length = None
+    oversize.content = _FakeContent(b"x" * (MAX_METRIC_RESPONSE_BYTES + 1))
+    with pytest.raises(KomariProtocolError, match="size"):
+        await make_client(FakeSession([oversize])).async_get_metric_definitions(
+            DYNAMIC_METRIC_METHODS
+        )
+
+    invalid_json = rpc_result(1, [])
+    invalid_json.content_length = None
+    invalid_json.content = _FakeContent(b"not-json")
+    with pytest.raises(KomariProtocolError, match="invalid JSON"):
+        await make_client(FakeSession([invalid_json])).async_get_metric_definitions(
+            DYNAMIC_METRIC_METHODS
+        )

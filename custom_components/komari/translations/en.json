@@ -84,6 +84,35 @@
           "ping_stat_keys": "Statistics"
         }
       },
+      "metrics": {
+        "title": "Dynamic metrics",
+        "description": "Select up to 8 retained custom metrics. Newly discovered metrics are not selected automatically.",
+        "data": {
+          "metric_interval": "Dynamic metric interval",
+          "metric_keys": "Monitored metrics"
+        }
+      },
+      "metric_filters": {
+        "title": "Metric tag filters",
+        "description": "Optionally enter exact tag filters as an object keyed by metric name. Invalid filters are never broadened into unfiltered queries.",
+        "data": {
+          "metric_tag_filters": "Exact tag filters"
+        }
+      },
+      "metric_preview": {
+        "title": "Preview dynamic metrics",
+        "description": "This selection can create up to {entity_count} dynamic metric entities. The per-panel limit is {entity_limit}.",
+        "data": {
+          "confirm": "Save and reload this panel"
+        }
+      },
+      "metrics_unavailable": {
+        "title": "Dynamic metrics unavailable",
+        "description": "This panel does not currently expose both Metric RPC methods. Existing selections are preserved unless you explicitly clear them.",
+        "data": {
+          "clear_saved_metric_selections": "Clear saved dynamic metric selections"
+        }
+      },
       "confirm": {
         "title": "Confirm Komari options",
         "description": "This selection can create up to {entity_count} Ping entities. The per-panel limit is {entity_limit}.",
@@ -99,6 +128,10 @@
       "ping_stats_required": "Select at least one Ping statistic.",
       "invalid_ping_stat": "One or more Ping statistics are invalid.",
       "too_many_ping_entities": "This selection exceeds the 256 Ping entity limit.",
+      "too_many_metrics": "Select no more than 8 dynamic metrics.",
+      "invalid_metric_filter": "One or more metric tag filters are invalid.",
+      "too_many_metric_entities": "This selection exceeds the 128 dynamic metric entity limit.",
+      "metric_preview_failed": "The panel could not preview the selected dynamic metrics. Check the filters and try again.",
       "not_confirmed": "Confirm the preview before saving."
     }
   },
@@ -286,6 +319,22 @@
     "tls_verification_disabled": {
       "title": "TLS certificate verification is disabled for Komari",
       "description": "The HTTPS connection for **{entry_title}** does not verify the server certificate. If this is not a temporary test setup, reconfigure the integration and enable TLS verification."
+    },
+    "metric_capability_unavailable": {
+      "title": "Komari dynamic metrics unavailable",
+      "description": "The Komari panel **{entry_title}** does not currently expose both Metric RPC methods. Saved selections are retained and resume automatically when the capability returns."
+    },
+    "selected_metric_missing": {
+      "title": "Selected Komari metrics unavailable",
+      "description": "The Komari panel **{entry_title}** no longer lists {missing_count} selected dynamic metrics. Restore them on the panel or remove them in the integration options."
+    },
+    "metric_configuration_invalid": {
+      "title": "Komari dynamic metric configuration is invalid",
+      "description": "{invalid_count} saved dynamic metric selections or tag filters for **{entry_title}** are invalid. Invalid selections are disabled rather than queried without their filters. Review the integration options."
+    },
+    "metric_entity_limit_exceeded": {
+      "title": "Komari dynamic metric entity limit exceeded",
+      "description": "**{entry_title}** found {entity_count} dynamic metric entities, above the per-panel limit of {entity_limit}. Existing entities are kept first; excess entities are not created. Reduce the selected metrics or add tag filters."
     }
   }
 }

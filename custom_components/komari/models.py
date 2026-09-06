@@ -11,6 +11,14 @@ from statistics import fmean, pstdev
 from types import MappingProxyType
 from typing import Any
 
+from .const import (
+    MAX_METRIC_DEFINITIONS,
+    MAX_METRIC_POINTS_PER_SERIES,
+    MAX_METRIC_SERIES,
+    MAX_METRIC_TAG_KEY_LENGTH,
+    MAX_METRIC_TAG_VALUE_LENGTH,
+    MAX_METRIC_TAGS,
+)
 from .exceptions import KomariProtocolError
 
 _EMPTY_GPU_NAMES = frozenset(
@@ -138,6 +146,56 @@ class KomariPingStats:
 
 
 @dataclass(frozen=True, slots=True)
+class KomariMetricDefinition:
+    """Normalized server-declared Metric Definition."""
+
+    metric_key: str
+    description: str | Mapping[str, str] | None
+    metric_type: str
+    unit: str | None
+    retention_days: int
+    metadata: Mapping[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class KomariMetricSeriesKey:
+    """Stable identity of one node-scoped Metric series."""
+
+    metric_key: str
+    entity_id: str
+    tags: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class KomariMetricValue:
+    """Newest valid numeric value of one Metric series."""
+
+    value: float | None
+    observed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class KomariMetricValues(Mapping[KomariMetricSeriesKey, KomariMetricValue]):
+    """Immutable Metric values plus sanitized parser skip counters."""
+
+    data: Mapping[KomariMetricSeriesKey, KomariMetricValue]
+    skipped_series_count: int = 0
+    skipped_point_count: int = 0
+
+    def __getitem__(self, key: KomariMetricSeriesKey) -> KomariMetricValue:
+        """Return one normalized series value."""
+        return self.data[key]
+
+    def __iter__(self):
+        """Iterate normalized series identities."""
+        return iter(self.data)
+
+    def __len__(self) -> int:
+        """Return the number of retained Metric series."""
+        return len(self.data)
+
+
+@dataclass(frozen=True, slots=True)
 class KomariBootstrapData:
     """Data required to create and initially load a config entry."""
 
@@ -246,6 +304,227 @@ def parse_ping_tasks(payload: object) -> Mapping[str, KomariPingTask]:
             clients=normalized_clients,
         )
     return MappingProxyType(tasks)
+
+
+def parse_metric_definitions(
+    payload: object,
+    *,
+    max_definitions: int = MAX_METRIC_DEFINITIONS,
+) -> Mapping[str, KomariMetricDefinition]:
+    """Normalize a bounded Metric Definition list.
+
+    The RPC contract returns an array. A malformed top-level response, an
+    over-limit list, or an ambiguous duplicate is a protocol failure rather
+    than a partially published discovery result.
+    """
+    if not isinstance(payload, list):
+        raise KomariProtocolError("Metric definitions response must be an array")
+    if len(payload) > max_definitions:
+        raise KomariProtocolError("Metric definitions response exceeds safe limit")
+
+    definitions: dict[str, KomariMetricDefinition] = {}
+    for raw_definition in payload:
+        if not isinstance(raw_definition, Mapping):
+            raise KomariProtocolError("Each Metric definition must be an object")
+        metric_key = _optional_str(raw_definition.get("name"))
+        metric_type = _optional_str(raw_definition.get("type"))
+        if metric_key is None or metric_type is None:
+            raise KomariProtocolError("Metric definition is missing name or type")
+        if metric_key in definitions:
+            raise KomariProtocolError("Metric definitions contain a duplicate name")
+
+        raw_retention = raw_definition.get("retention_days")
+        retention_days = _optional_non_negative_int(raw_retention)
+        if raw_retention is not None and retention_days is None:
+            raise KomariProtocolError("Metric definition has invalid retention_days")
+        definitions[metric_key] = KomariMetricDefinition(
+            metric_key=metric_key,
+            description=_parse_metric_description(raw_definition.get("description")),
+            metric_type=metric_type,
+            unit=_optional_str(raw_definition.get("unit")),
+            retention_days=retention_days or 0,
+            metadata=_parse_metric_metadata(raw_definition.get("metadata")),
+        )
+    return MappingProxyType(definitions)
+
+
+def parse_metric_values(
+    payload: object,
+    *,
+    max_series: int = MAX_METRIC_SERIES,
+    max_points_per_series: int = MAX_METRIC_POINTS_PER_SERIES,
+) -> KomariMetricValues:
+    """Normalize bounded Metric query results without retaining raw points.
+
+    Only a valid time-zone-aware timestamp and a finite numeric value produce
+    a current value. ``null`` is preserved as an unavailable series value so
+    callers can leave an existing entity unavailable without inventing a
+    numeric state. ``labels`` is deliberately ignored: only ``tags`` belongs
+    to the wire-level series identity.
+    """
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("series"), list):
+        raise KomariProtocolError("Metric query response must contain a series array")
+    raw_series = payload["series"]
+    if len(raw_series) > max_series:
+        raise KomariProtocolError("Metric query response exceeds safe series limit")
+
+    values: dict[KomariMetricSeriesKey, KomariMetricValue] = {}
+    skipped_series_count = 0
+    skipped_point_count = 0
+    for raw in raw_series:
+        parsed = _parse_metric_series(
+            raw,
+            max_points_per_series=max_points_per_series,
+        )
+        if parsed is None:
+            skipped_series_count += 1
+            continue
+        key, candidate, skipped_points = parsed
+        skipped_point_count += skipped_points
+        existing = values.get(key)
+        if existing is None or _prefer_metric_value(candidate, existing):
+            values[key] = candidate
+    return KomariMetricValues(
+        data=MappingProxyType(values),
+        skipped_series_count=skipped_series_count,
+        skipped_point_count=skipped_point_count,
+    )
+
+
+def _parse_metric_description(value: object) -> str | Mapping[str, str] | None:
+    """Normalize a localizable Metric description without coercing values."""
+    if isinstance(value, str):
+        return _optional_str(value)
+    if not isinstance(value, Mapping):
+        return None
+    translations = {
+        key.strip(): text.strip()
+        for key, text in value.items()
+        if isinstance(key, str)
+        and key.strip()
+        and isinstance(text, str)
+        and text.strip()
+    }
+    return MappingProxyType(translations) if translations else None
+
+
+def _parse_metric_metadata(value: object) -> Mapping[str, str]:
+    """Keep only explicit string metadata in an immutable mapping."""
+    if not isinstance(value, Mapping):
+        return MappingProxyType({})
+    return MappingProxyType(
+        {
+            key.strip(): item
+            for key, item in value.items()
+            if isinstance(key, str) and key.strip() and isinstance(item, str)
+        }
+    )
+
+
+def _parse_metric_series(
+    raw: object,
+    *,
+    max_points_per_series: int,
+) -> tuple[KomariMetricSeriesKey, KomariMetricValue, int] | None:
+    """Parse one query series or ignore a malformed non-authoritative entry."""
+    if not isinstance(raw, Mapping):
+        return None
+    metric_key = _optional_str(raw.get("metric_key"))
+    entity_id = _optional_str(raw.get("entity_id"))
+    tags = _canonical_metric_tags(raw.get("tags"))
+    points = raw.get("points")
+    if (
+        metric_key is None
+        or entity_id is None
+        or tags is None
+        or not isinstance(points, list)
+    ):
+        return None
+    if len(points) > max_points_per_series:
+        raise KomariProtocolError("Metric series exceeds safe point limit")
+
+    latest_point_at: datetime | None = None
+    latest_value: tuple[datetime, float] | None = None
+    skipped_point_count = 0
+    for raw_point in points:
+        if not isinstance(raw_point, Mapping):
+            skipped_point_count += 1
+            continue
+        observed_at = _parse_metric_point_datetime(raw_point)
+        if observed_at is None:
+            skipped_point_count += 1
+            continue
+        if latest_point_at is None or observed_at > latest_point_at:
+            latest_point_at = observed_at
+        raw_value = raw_point.get("value")
+        if raw_value is None:
+            continue
+        value = _optional_finite_float(raw_value)
+        if value is None:
+            skipped_point_count += 1
+            continue
+        if latest_value is None or observed_at > latest_value[0]:
+            latest_value = (observed_at, value)
+
+    if latest_value is not None:
+        value, observed_at = latest_value[1], latest_value[0]
+    elif latest_point_at is not None:
+        value, observed_at = None, latest_point_at
+    else:
+        return None
+    return (
+        KomariMetricSeriesKey(
+            metric_key=metric_key,
+            entity_id=entity_id,
+            tags=tags,
+        ),
+        KomariMetricValue(value=value, observed_at=observed_at),
+        skipped_point_count,
+    )
+
+
+def _canonical_metric_tags(value: object) -> tuple[tuple[str, str], ...] | None:
+    """Return bounded sorted tag identity without delimiter-based collisions."""
+    if value is None:
+        return ()
+    if not isinstance(value, Mapping) or len(value) > MAX_METRIC_TAGS:
+        return None
+    tags: list[tuple[str, str]] = []
+    for key, item in value.items():
+        if (
+            not isinstance(key, str)
+            or not key
+            or len(key) > MAX_METRIC_TAG_KEY_LENGTH
+            or not isinstance(item, str)
+            or len(item) > MAX_METRIC_TAG_VALUE_LENGTH
+        ):
+            return None
+        tags.append((key, item))
+    return tuple(sorted(tags))
+
+
+def _parse_metric_point_datetime(value: Mapping[object, object]) -> datetime | None:
+    """Accept documented and transitional point timestamp field names."""
+    for field in ("timestamp", "time", "ts"):
+        if (parsed := parse_datetime(value.get(field))) is not None:
+            return parsed
+    return None
+
+
+def _prefer_metric_value(
+    candidate: KomariMetricValue,
+    existing: KomariMetricValue,
+) -> bool:
+    """Choose a finite value over null, then the newest timestamp."""
+    if candidate.value is not None and existing.value is None:
+        return True
+    if candidate.value is None and existing.value is not None:
+        return False
+    if candidate.observed_at is None:
+        return False
+    if existing.observed_at is None:
+        return True
+    return candidate.observed_at > existing.observed_at
 
 
 def parse_ping_metric_stats(

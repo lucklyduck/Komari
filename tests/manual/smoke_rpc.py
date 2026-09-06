@@ -10,6 +10,7 @@ from contextlib import suppress
 from aiohttp import ClientSession
 from custom_components.komari.api import KomariApiClient
 from custom_components.komari.const import (
+    DYNAMIC_METRIC_METHODS,
     METHOD_PING_METRIC_STATS,
     METHOD_PUBLIC_PING_TASKS,
     PING_STATS_METHODS,
@@ -18,6 +19,7 @@ from custom_components.komari.exceptions import (
     KomariAuthenticationError,
     KomariConnectionError,
     KomariMethodNotFoundError,
+    KomariProtocolError,
     KomariRpcError,
     KomariUnsupportedError,
 )
@@ -78,6 +80,20 @@ async def _smoke_fake(panel_a: str, panel_b: str, panel_c: str) -> None:
         )
         bootstrap_c = await client_c.async_get_bootstrap()
         assert set(bootstrap_a.nodes) & set(bootstrap_b.nodes) & set(bootstrap_c.nodes)
+
+        assert DYNAMIC_METRIC_METHODS.issubset(bootstrap_a.capabilities)
+        definitions_a = await client_a.async_get_metric_definitions(
+            bootstrap_a.capabilities
+        )
+        metric_keys_a = tuple(definitions_a)
+        metric_values_a = await client_a.async_query_metrics(
+            bootstrap_a.capabilities,
+            metric_keys=metric_keys_a,
+            entity_ids=tuple(bootstrap_a.nodes),
+            tags={},
+        )
+        assert metric_values_a
+        assert any(value.value is None for value in metric_values_a.values())
 
         tasks_a, tasks_b = await asyncio.gather(
             client_a.async_get_ping_tasks(bootstrap_a.capabilities),
@@ -142,6 +158,59 @@ async def _smoke_fake(panel_a: str, panel_b: str, panel_c: str) -> None:
         await _control(session, panel_b, "recover-ping")
         await client_b.async_get_ping_tasks(bootstrap_b.capabilities)
 
+        await _control(session, panel_a, "fail-metrics")
+        await client_a.async_get_latest_status()
+        try:
+            await client_a.async_query_metrics(
+                bootstrap_a.capabilities,
+                metric_keys=metric_keys_a,
+                entity_ids=tuple(bootstrap_a.nodes),
+                tags={},
+            )
+        except KomariRpcError:
+            pass
+        else:
+            raise AssertionError("Metric branch failure did not stay isolated")
+        await _control(session, panel_a, "recover-metrics")
+
+        await _control(session, panel_a, "metric-method-not-found")
+        try:
+            await client_a.async_query_metrics(
+                bootstrap_a.capabilities,
+                metric_keys=metric_keys_a,
+                entity_ids=tuple(bootstrap_a.nodes),
+                tags={},
+            )
+        except KomariMethodNotFoundError:
+            pass
+        else:
+            raise AssertionError("Metric method did not report Method Not Found")
+        await _control(session, panel_a, "restore-metric-method")
+
+        await _control(session, panel_a, "malformed-metrics")
+        try:
+            await client_a.async_query_metrics(
+                bootstrap_a.capabilities,
+                metric_keys=metric_keys_a,
+                entity_ids=tuple(bootstrap_a.nodes),
+                tags={},
+            )
+        except KomariProtocolError:
+            pass
+        else:
+            raise AssertionError("Malformed Metric response was accepted")
+        await _control(session, panel_a, "restore-metrics")
+
+        await _control(session, panel_a, "high-cardinality-metrics")
+        high_cardinality = await client_a.async_query_metrics(
+            bootstrap_a.capabilities,
+            metric_keys=("custom.rate",),
+            entity_ids=tuple(bootstrap_a.nodes),
+            tags={},
+        )
+        assert len(high_cardinality) == 129
+        await _control(session, panel_a, "restore-metric-cardinality")
+
         await _control(session, panel_b, "method-not-found")
         try:
             await client_b.async_get_ping_stats(
@@ -172,17 +241,20 @@ async def _smoke_fake(panel_a: str, panel_b: str, panel_c: str) -> None:
 
         await _control(session, panel_c, "rotate-key")
         try:
-            await client_c.async_get_latest_status()
+            await client_c.async_get_metric_definitions(bootstrap_c.capabilities)
         except KomariAuthenticationError:
             pass
         else:
             raise AssertionError("Rotated fake key remained valid")
         replacement_c = KomariApiClient(session, panel_c, FAKE_API_KEYS[1])
-        await replacement_c.async_get_latest_status()
+        replacement_definitions = await replacement_c.async_get_metric_definitions(
+            bootstrap_c.capabilities
+        )
+        assert replacement_definitions
 
     _LOGGER.info(
         "Three-panel RPC2 smoke passed: shared identities, lifecycle controls, "
-        "Ping isolation/fallback, delay, and key rotation"
+        "Ping/Metric isolation, bounded Metric faults, delay, and key rotation"
     )
 
 

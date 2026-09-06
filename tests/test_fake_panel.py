@@ -6,6 +6,9 @@ from tests.manual.fake_komari import (
     ADDED_NODE_UUID,
     ADDED_TASK_ID,
     FAKE_API_KEYS,
+    METRIC_DEFINITIONS,
+    METRIC_HIGH_CARDINALITY_SERIES,
+    METRIC_METHODS,
     PING_METHODS,
     RPC_METHODS,
     SHARED_NODE_UUID,
@@ -91,6 +94,55 @@ def test_fake_panel_ping_tasks_stats_and_lifecycle_controls() -> None:
     assert PING_METHODS
     panel.method_not_found.add("public:getPingMetricStats")
     assert "public:getPingMetricStats" in panel.method_not_found
+
+
+def test_fake_panel_metrics_cover_empty_and_high_cardinality_responses() -> None:
+    """The fake panel provides deterministic safe and hostile Metric payloads."""
+    panel = FakeKomariPanel("Panel A", node_list_as_mapping=True)
+    assert set(RPC_METHODS) >= METRIC_METHODS
+    definitions = cast(
+        "list[dict[str, Any]]",
+        panel.rpc_result("public:listMetricDefinitions"),
+    )
+    assert definitions == [dict(definition) for definition in METRIC_DEFINITIONS]
+
+    payload = cast(
+        "dict[str, list[dict[str, Any]]]",
+        panel.rpc_result(
+            "public:queryMetrics",
+            {
+                "metric_keys": ["custom.rate", "custom.empty"],
+                "entity_ids": [SHARED_NODE_UUID],
+                "tags": {},
+            },
+        ),
+    )
+    assert {series["metric_key"] for series in payload["series"]} == {
+        "custom.rate",
+        "custom.empty",
+    }
+    assert any(
+        point["value"] is None
+        for series in payload["series"]
+        for point in series["points"]
+    )
+
+    panel.metric_malformed = True
+    assert panel.rpc_result("public:queryMetrics") == {"series": "malformed"}
+    panel.metric_malformed = False
+    panel.metric_high_cardinality = True
+    high_cardinality = cast(
+        "dict[str, list[dict[str, Any]]]",
+        panel.rpc_result(
+            "public:queryMetrics",
+            {
+                "metric_keys": ["custom.rate"],
+                "entity_ids": [SHARED_NODE_UUID],
+                "tags": {},
+            },
+        ),
+    )
+    assert len(high_cardinality["series"]) == METRIC_HIGH_CARDINALITY_SERIES
 
 
 def test_fake_private_panel_key_rotation_is_deterministic() -> None:

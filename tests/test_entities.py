@@ -20,12 +20,16 @@ from custom_components.komari.const import (
     CONF_API_KEY,
     CONF_ENABLE_EXPIRY_ENTITIES,
     CONF_ENABLE_TRAFFIC_ENTITIES,
+    CONF_METRIC_KEYS,
     CONF_PING_STAT_KEYS,
     CONF_PING_TASK_IDS,
     DOMAIN,
+    MAX_METRIC_ENTITIES,
     MAX_PING_ENTITIES,
     METHOD_PING_METRIC_STATS,
+    METHOD_PUBLIC_METRIC_DEFINITIONS,
     METHOD_PUBLIC_PING_TASKS,
+    METHOD_PUBLIC_QUERY_METRICS,
 )
 from custom_components.komari.coordinator import (
     BRANCH_PING_STATS,
@@ -41,10 +45,14 @@ from custom_components.komari.diagnostics import (
 )
 from custom_components.komari.models import (
     KomariBootstrapData,
+    KomariMetricDefinition,
+    KomariMetricSeriesKey,
+    KomariMetricValue,
     KomariNode,
     KomariNodeStatus,
     KomariPanelInfo,
     TrafficLimitType,
+    parse_metric_definitions,
     parse_nodes,
     parse_ping_metric_stats,
     parse_ping_tasks,
@@ -64,6 +72,10 @@ from custom_components.komari.sensor import (
     PING_SENSOR_DESCRIPTIONS,
     TRAFFIC_METADATA_SENSOR_DESCRIPTIONS,
     TRAFFIC_STATUS_SENSOR_DESCRIPTIONS,
+    _metric_description,
+    _metric_name,
+    _metric_sensor_metadata,
+    metric_unique_id,
     traffic_used_by_limit_rule,
     usage_percentage,
 )
@@ -253,6 +265,44 @@ async def _setup_ping_entry(
         )
 
 
+async def _setup_metric_entry(
+    hass: HomeAssistant,
+    *,
+    definitions: Mapping[str, KomariMetricDefinition],
+    values: Mapping[KomariMetricSeriesKey, KomariMetricValue],
+    selected_metric_keys: list[str],
+    title: str = "Komari Lab",
+    url: str = "https://metric.example.test",
+) -> KomariConfigEntry:
+    """Set up one full Metric-capable entry with deterministic series data."""
+    bootstrap = _bootstrap(
+        panel_name=title,
+        capabilities=frozenset(
+            {
+                METHOD_PUBLIC_METRIC_DEFINITIONS,
+                METHOD_PUBLIC_QUERY_METRICS,
+            }
+        ),
+    )
+    with (
+        patch(
+            "custom_components.komari.api.KomariApiClient.async_get_metric_definitions",
+            new=AsyncMock(return_value=definitions),
+        ),
+        patch(
+            "custom_components.komari.api.KomariApiClient.async_query_metrics",
+            new=AsyncMock(return_value=values),
+        ),
+    ):
+        return await _setup_entry(
+            hass,
+            bootstrap,
+            title=title,
+            url=url,
+            options={CONF_METRIC_KEYS: selected_metric_keys},
+        )
+
+
 def _unique_id(entry_id: str, scope: str, key: str) -> str:
     """Return an expected stable entity unique ID."""
     return f"{entry_id}:{scope}:{key}"
@@ -344,6 +394,86 @@ def test_unknown_traffic_limit_type_is_not_guessed() -> None:
 
     assert node.traffic_limit_type is None
     assert traffic_used_by_limit_rule(node, status) is None
+
+
+def test_dynamic_metric_description_name_and_metadata_mappings() -> None:
+    """Metric presentation follows locale, tag, type, and unit contracts."""
+    gauge = KomariMetricDefinition(
+        metric_key="custom.rate",
+        description={"en": "Rate", "zh": "速率"},
+        metric_type="gauge",
+        unit="percent",
+        retention_days=7,
+        metadata={},
+    )
+    assert _metric_description(gauge, "zh-Hans") == "速率"
+    assert _metric_sensor_metadata(gauge) == (
+        None,
+        PERCENTAGE,
+        SensorStateClass.MEASUREMENT,
+    )
+
+    counter = KomariMetricDefinition(
+        metric_key="custom.bytes",
+        description="Byte counter",
+        metric_type="counter",
+        unit="bytes",
+        retention_days=7,
+        metadata={},
+    )
+    assert _metric_description(counter, "de-DE") == "Byte counter"
+    assert _metric_sensor_metadata(counter) == (
+        SensorDeviceClass.DATA_SIZE,
+        UnitOfInformation.BYTES,
+        SensorStateClass.TOTAL_INCREASING,
+    )
+
+    fallback = KomariMetricDefinition(
+        metric_key="custom.fallback",
+        description={"zz": "Zulu", "aa": "Alpha"},
+        metric_type="histogram",
+        unit="ms",
+        retention_days=7,
+        metadata={},
+    )
+    assert _metric_description(fallback, "de-DE") == "Alpha"
+    assert _metric_sensor_metadata(fallback) == (
+        SensorDeviceClass.DURATION,
+        UnitOfTime.MILLISECONDS,
+        None,
+    )
+    name = _metric_name(
+        fallback,
+        "de-DE",
+        (("z", "x" * 90), ("a", "edge")),
+    )
+    assert name.startswith("Alpha (a=edge, z=")
+    assert "..." in name
+    assert len(name) <= len("Alpha ()") + 80
+
+    temperature = KomariMetricDefinition(
+        metric_key="custom.temperature",
+        description=None,
+        metric_type="summary",
+        unit="celsius",
+        retention_days=7,
+        metadata={},
+    )
+    assert _metric_description(temperature, "de-DE") == "custom.temperature"
+    assert _metric_sensor_metadata(temperature) == (
+        SensorDeviceClass.TEMPERATURE,
+        UnitOfTemperature.CELSIUS,
+        None,
+    )
+    unknown = KomariMetricDefinition(
+        metric_key="custom.unknown",
+        description=None,
+        metric_type="summary",
+        unit="watts",
+        retention_days=7,
+        metadata={},
+    )
+    assert _metric_sensor_metadata(unknown) == (None, None, None)
 
 
 async def test_panel_and_node_core_entities(hass: HomeAssistant) -> None:
@@ -1756,6 +1886,82 @@ async def test_confirmed_node_removal_cleans_device_and_all_node_entities(
     assert hass.states.get(second_cpu_id) is None
 
 
+async def test_confirmed_node_removal_same_uuid_recreates_entities_without_reload(
+    hass: HomeAssistant,
+) -> None:
+    """Known entity keys are released when a confirmed-removed node returns."""
+    reappearing_node = _node_payload(SECOND_NODE_UUID, name="Second node")
+    reappearing_node["expired_at"] = "2030-01-01T00:00:00Z"
+    reappearing_status = _status_payload(SECOND_NODE_UUID)
+    bootstrap = _bootstrap(
+        node_payloads=[_node_payload(NODE_UUID), reappearing_node],
+        status_payloads=[_status_payload(NODE_UUID), reappearing_status],
+    )
+    entry = await _setup_entry(hass, bootstrap)
+    coordinator = entry.runtime_data.coordinator
+    entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
+    remaining_nodes = parse_nodes([_node_payload(NODE_UUID)])
+    remaining_statuses = parse_statuses([_status_payload(NODE_UUID)])
+
+    with (
+        patch.object(
+            coordinator.client,
+            "async_get_nodes",
+            new=AsyncMock(return_value=remaining_nodes),
+        ),
+        patch.object(
+            coordinator.client,
+            "async_get_latest_status",
+            new=AsyncMock(return_value=remaining_statuses),
+        ),
+    ):
+        for _ in range(3):
+            coordinator._last_inventory_attempt = -1_000_000
+            coordinator.async_set_updated_data(await coordinator._async_update_data())
+            await hass.async_block_till_done()
+
+    assert get_node_device(device_registry, entry.entry_id, SECOND_NODE_UUID) is None
+
+    reappeared_nodes = parse_nodes([_node_payload(NODE_UUID), reappearing_node])
+    reappeared_statuses = parse_statuses(
+        [_status_payload(NODE_UUID), reappearing_status]
+    )
+    with (
+        patch.object(
+            coordinator.client,
+            "async_get_nodes",
+            new=AsyncMock(return_value=reappeared_nodes),
+        ),
+        patch.object(
+            coordinator.client,
+            "async_get_latest_status",
+            new=AsyncMock(return_value=reappeared_statuses),
+        ),
+    ):
+        coordinator._last_inventory_attempt = -1_000_000
+        coordinator.async_set_updated_data(await coordinator._async_update_data())
+        await hass.async_block_till_done()
+
+    second_scope = f"node:{SECOND_NODE_UUID}"
+    unique_ids = (
+        _unique_id(entry.entry_id, second_scope, "cpu_usage"),
+        _unique_id(entry.entry_id, second_scope, "expires_at"),
+        _unique_id(entry.entry_id, second_scope, "online"),
+    )
+    assert (
+        get_node_device(device_registry, entry.entry_id, SECOND_NODE_UUID) is not None
+    )
+    assert _state(hass, _entity_id(hass, "sensor", unique_ids[0])).state == "12.5"
+    assert _entity_id(hass, "sensor", unique_ids[1])
+    assert _state(hass, _entity_id(hass, "binary_sensor", unique_ids[2])).state == "on"
+    assert all(
+        sum(item.unique_id == unique_id for item in entity_registry.entities.values())
+        == 1
+        for unique_id in unique_ids
+    )
+
+
 async def test_confirmed_ping_task_removal_cleans_only_that_task(
     hass: HomeAssistant,
 ) -> None:
@@ -1809,6 +2015,86 @@ async def test_confirmed_ping_task_removal_cleans_only_that_task(
         _unique_id(entry.entry_id, f"node:{NODE_UUID}", "cpu_usage"),
     )
     assert _state(hass, cpu_id).state != STATE_UNAVAILABLE
+
+
+async def test_confirmed_ping_task_removal_same_id_recreates_entities(
+    hass: HomeAssistant,
+) -> None:
+    """Known Ping keys are released when a confirmed-removed task returns."""
+    task_payloads = [
+        {"id": 101, "name": "Task one"},
+        {"id": 202, "name": "Task two"},
+    ]
+    stats_payloads = [
+        {"entity_id": NODE_UUID, "task_id": 101, "latest": 10, "loss": 0},
+        {"entity_id": NODE_UUID, "task_id": 202, "latest": 20, "loss": 5},
+    ]
+    entry = await _setup_ping_entry(
+        hass,
+        task_payloads=task_payloads,
+        stats_payloads=stats_payloads,
+        selected_task_ids=["101", "202"],
+        selected_stats=["latest", "loss"],
+    )
+    coordinator = entry.runtime_data.coordinator
+    remaining_tasks = parse_ping_tasks([{"id": 101, "name": "Task one"}])
+
+    with (
+        patch.object(
+            coordinator.client,
+            "async_get_ping_tasks",
+            new=AsyncMock(return_value=remaining_tasks),
+        ),
+        patch.object(
+            coordinator.client,
+            "async_get_latest_status",
+            new=AsyncMock(return_value=coordinator.data.statuses),
+        ),
+    ):
+        for _ in range(3):
+            coordinator._last_ping_tasks_attempt = -1_000_000
+            coordinator.async_set_updated_data(await coordinator._async_update_data())
+            await hass.async_block_till_done()
+
+    restored_tasks = parse_ping_tasks(task_payloads)
+    restored_stats = parse_ping_metric_stats({"stats": stats_payloads})
+    with (
+        patch.object(
+            coordinator.client,
+            "async_get_ping_tasks",
+            new=AsyncMock(return_value=restored_tasks),
+        ),
+        patch.object(
+            coordinator.client,
+            "async_get_ping_stats",
+            new=AsyncMock(return_value=restored_stats),
+        ),
+        patch.object(
+            coordinator.client,
+            "async_get_latest_status",
+            new=AsyncMock(return_value=coordinator.data.statuses),
+        ),
+    ):
+        coordinator._last_ping_tasks_attempt = -1_000_000
+        coordinator._last_ping_stats_attempt = -1_000_000
+        coordinator.async_set_updated_data(await coordinator._async_update_data())
+        await hass.async_block_till_done()
+
+    registry = er.async_get(hass)
+    restored_unique_ids = (
+        f"{entry.entry_id}:node:{NODE_UUID}:ping:202:latest",
+        f"{entry.entry_id}:node:{NODE_UUID}:ping:202:loss",
+    )
+    assert (
+        _state(hass, _entity_id(hass, "sensor", restored_unique_ids[0])).state == "20.0"
+    )
+    assert (
+        _state(hass, _entity_id(hass, "sensor", restored_unique_ids[1])).state == "5.0"
+    )
+    assert all(
+        sum(item.unique_id == unique_id for item in registry.entities.values()) == 1
+        for unique_id in restored_unique_ids
+    )
 
 
 async def test_reload_cleans_deselected_ping_tasks_and_statistics(
@@ -1874,6 +2160,214 @@ async def test_reload_cleans_deselected_ping_tasks_and_statistics(
     assert all(
         registry.async_get_entity_id("sensor", DOMAIN, unique_id) is None
         for unique_id in removed
+    )
+
+
+async def test_dynamic_metric_sensor_has_stable_identity_and_recovers_series(
+    hass: HomeAssistant,
+) -> None:
+    """A selected Metric is node-scoped, bounded, and survives an empty poll."""
+    series_key = KomariMetricSeriesKey(
+        "custom.rate",
+        NODE_UUID,
+        (("region", "edge"), ("role", "web")),
+    )
+    definitions = parse_metric_definitions(
+        [
+            {
+                "name": "custom.rate",
+                "description": {"en": "Custom rate", "zh-Hans": "自定义速率"},
+                "type": "gauge",
+                "unit": "bytes/s",
+                "retention_days": 7,
+            }
+        ]
+    )
+    values = {
+        series_key: KomariMetricValue(
+            value=12.5,
+            observed_at=datetime(2026, 8, 26, tzinfo=UTC),
+        )
+    }
+    entry = await _setup_metric_entry(
+        hass,
+        definitions=definitions,
+        values=values,
+        selected_metric_keys=["custom.rate"],
+    )
+    unique_id = metric_unique_id(entry.entry_id, series_key)
+    entity_id = _entity_id(hass, "sensor", unique_id)
+    state = _state(hass, entity_id)
+
+    assert state.state == "12.5"
+    assert state.attributes[ATTR_DEVICE_CLASS] == SensorDeviceClass.DATA_RATE
+    assert state.attributes[ATTR_UNIT_OF_MEASUREMENT] == UnitOfDataRate.BYTES_PER_SECOND
+    assert state.attributes["state_class"] == SensorStateClass.MEASUREMENT
+    assert all(
+        key not in state.attributes for key in ("tags", "labels", "metadata", "points")
+    )
+    assert (
+        metric_unique_id(
+            entry.entry_id,
+            KomariMetricSeriesKey(
+                "custom.rate",
+                NODE_UUID,
+                (("role", "web"), ("region", "edge")),
+            ),
+        )
+        == unique_id
+    )
+    encoded_unique_id = metric_unique_id(
+        entry.entry_id,
+        KomariMetricSeriesKey("custom/rate", NODE_UUID, ()),
+    )
+    assert ":metric:custom%2Frate:" in encoded_unique_id
+    assert len(encoded_unique_id.rsplit(":", 1)[-1]) == 64
+
+    coordinator = entry.runtime_data.coordinator
+    coordinator.async_set_updated_data(replace(coordinator.data, metric_values={}))
+    await hass.async_block_till_done()
+    assert _state(hass, entity_id).state == STATE_UNAVAILABLE
+
+    coordinator.async_set_updated_data(replace(coordinator.data, metric_values=values))
+    await hass.async_block_till_done()
+    assert _state(hass, entity_id).state == "12.5"
+    registry = er.async_get(hass)
+    assert sum(item.unique_id == unique_id for item in registry.entities.values()) == 1
+
+
+async def test_confirmed_removed_metric_definition_recreates_same_identity(
+    hass: HomeAssistant,
+) -> None:
+    """A three-miss Definition cleanup does not permanently block its return."""
+    series_key = KomariMetricSeriesKey("custom.rate", NODE_UUID, ())
+    definitions = parse_metric_definitions(
+        [
+            {
+                "name": "custom.rate",
+                "description": "Custom rate",
+                "type": "gauge",
+                "retention_days": 7,
+            }
+        ]
+    )
+    values = {
+        series_key: KomariMetricValue(
+            value=12.5,
+            observed_at=datetime(2026, 8, 26, tzinfo=UTC),
+        )
+    }
+    entry = await _setup_metric_entry(
+        hass,
+        definitions=definitions,
+        values=values,
+        selected_metric_keys=["custom.rate"],
+    )
+    unique_id = metric_unique_id(entry.entry_id, series_key)
+    entity_id = _entity_id(hass, "sensor", unique_id)
+    coordinator = entry.runtime_data.coordinator
+    coordinator._confirmed_removed_metric_keys.add("custom.rate")
+    coordinator.async_set_updated_data(
+        replace(
+            coordinator.data,
+            metric_definitions={},
+            metric_values={},
+        )
+    )
+    await hass.async_block_till_done()
+
+    registry = er.async_get(hass)
+    assert registry.async_get_entity_id("sensor", DOMAIN, unique_id) is None
+    assert hass.states.get(entity_id) is None
+
+    coordinator._confirmed_removed_metric_keys.clear()
+    coordinator.async_set_updated_data(
+        replace(
+            coordinator.data,
+            metric_definitions=definitions,
+            metric_values=values,
+        )
+    )
+    await hass.async_block_till_done()
+
+    recreated_entity_id = _entity_id(hass, "sensor", unique_id)
+    assert _state(hass, recreated_entity_id).state == "12.5"
+    assert sum(item.unique_id == unique_id for item in registry.entities.values()) == 1
+
+
+async def test_dynamic_metric_entities_are_entry_scoped_and_cap_high_cardinality(
+    hass: HomeAssistant,
+) -> None:
+    """Shared node IDs remain isolated and runtime candidates stop at 128 entities."""
+    definitions = parse_metric_definitions(
+        [
+            {
+                "name": "custom.rate",
+                "description": "Custom rate",
+                "type": "counter",
+                "unit": "count",
+                "retention_days": 7,
+            }
+        ]
+    )
+    values = {
+        KomariMetricSeriesKey(
+            "custom.rate",
+            NODE_UUID,
+            (("series", str(index)),),
+        ): KomariMetricValue(
+            value=float(index),
+            observed_at=datetime(2026, 8, 26, tzinfo=UTC),
+        )
+        for index in range(MAX_METRIC_ENTITIES + 1)
+    }
+    entry_a = await _setup_metric_entry(
+        hass,
+        definitions=definitions,
+        values=values,
+        selected_metric_keys=["custom.rate"],
+        title="Metric A",
+        url="https://metric-a.example.test",
+    )
+    entry_b = await _setup_metric_entry(
+        hass,
+        definitions=definitions,
+        values={
+            KomariMetricSeriesKey("custom.rate", NODE_UUID, ()): KomariMetricValue(
+                value=1,
+                observed_at=datetime(2026, 8, 26, tzinfo=UTC),
+            )
+        },
+        selected_metric_keys=["custom.rate"],
+        title="Metric B",
+        url="https://metric-b.example.test",
+    )
+    registry = er.async_get(hass)
+    entries_a = [
+        item
+        for item in er.async_entries_for_config_entry(registry, entry_a.entry_id)
+        if ":metric:" in item.unique_id
+    ]
+    entries_b = [
+        item
+        for item in er.async_entries_for_config_entry(registry, entry_b.entry_id)
+        if ":metric:" in item.unique_id
+    ]
+
+    assert len(entries_a) == MAX_METRIC_ENTITIES
+    assert len(entries_b) == 1
+    assert all(
+        item.unique_id.startswith(f"{entry_a.entry_id}:node:") for item in entries_a
+    )
+    assert all(
+        item.unique_id.startswith(f"{entry_b.entry_id}:node:") for item in entries_b
+    )
+    assert (
+        ir.async_get(hass).async_get_issue(
+            DOMAIN,
+            issue_id(entry_a.entry_id, "metric_entity_limit_exceeded"),
+        )
+        is not None
     )
 
 
@@ -1982,6 +2476,7 @@ async def test_config_and_device_diagnostics_are_structural_and_redacted(
         "expiry": 5,
         "traffic": 4,
         "ping": 2,
+        "metric": 0,
     }
     assert entry_diagnostics["traffic_calculation_source"] == "agent_counters"
 

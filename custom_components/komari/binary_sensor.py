@@ -220,6 +220,12 @@ async def async_setup_entry(
 
     @callback
     def _async_add_new_node_entities() -> None:
+        node_ids = frozenset(coordinator.data.nodes)
+        known_entity_keys.intersection_update(
+            (node_uuid, key)
+            for node_uuid, key in known_entity_keys
+            if node_uuid in node_ids
+        )
         entities: list[BinarySensorEntity] = []
         for node_uuid, node in sorted(coordinator.data.nodes.items()):
             online_key = (node_uuid, NODE_ONLINE_DESCRIPTION.key)

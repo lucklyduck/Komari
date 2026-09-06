@@ -33,6 +33,8 @@ RPC_METHODS = (
     "public:getPingMetricStats",
     "public:getPingRecords",
     "common:getRecords",
+    "public:listMetricDefinitions",
+    "public:queryMetrics",
 )
 PING_METHODS = frozenset(
     {
@@ -42,6 +44,38 @@ PING_METHODS = frozenset(
         "common:getRecords",
     }
 )
+METRIC_METHODS = frozenset(
+    {
+        "public:listMetricDefinitions",
+        "public:queryMetrics",
+    }
+)
+METRIC_DEFINITIONS = (
+    {
+        "name": "custom.rate",
+        "description": {"en": "Fixture rate", "zh-Hans": "固定测试速率"},
+        "type": "gauge",
+        "unit": "bytes/s",
+        "retention_days": 7,
+        "metadata": {"source": "fake"},
+    },
+    {
+        "name": "custom.counter",
+        "description": "Fixture counter",
+        "type": "counter",
+        "unit": "count",
+        "retention_days": 30,
+        "metadata": {},
+    },
+    {
+        "name": "custom.empty",
+        "description": "Fixture empty value",
+        "type": "gauge",
+        "retention_days": 7,
+        "metadata": {},
+    },
+)
+METRIC_HIGH_CARDINALITY_SERIES = 129
 
 
 def _node(
@@ -119,6 +153,9 @@ class FakeKomariPanel:
     optional_hardware: bool = False
     failing: bool = False
     ping_failing: bool = False
+    metric_failing: bool = False
+    metric_malformed: bool = False
+    metric_high_cardinality: bool = False
     delay_seconds: float = 0
     nodes: dict[str, dict[str, Any]] = field(default_factory=dict)
     statuses: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -179,6 +216,12 @@ class FakeKomariPanel:
             return {"stats": self._ping_stats(params)}
         if method in {"public:getPingRecords", "common:getRecords"}:
             return {"records": self._ping_records()}
+        if method == "public:listMetricDefinitions":
+            return [dict(definition) for definition in METRIC_DEFINITIONS]
+        if method == "public:queryMetrics":
+            if self.metric_malformed:
+                return {"series": "malformed"}
+            return {"series": self._metric_query(params)}
         raise KeyError(method)
 
     def add_node(self) -> None:
@@ -279,6 +322,86 @@ class FakeKomariPanel:
             for task_id in self.tasks
         ]
 
+    def _metric_query(self, params: object | None) -> list[dict[str, Any]]:
+        """Return bounded deterministic Metric series for the requested filters."""
+        metric_keys = {str(definition["name"]) for definition in METRIC_DEFINITIONS}
+        entity_ids = set(self.nodes)
+        requested_tags: dict[str, str] = {}
+        if isinstance(params, dict):
+            if isinstance(params.get("metric_keys"), list):
+                metric_keys &= {
+                    metric_key
+                    for item in params["metric_keys"]
+                    if isinstance(item, str)
+                    for metric_key in (item,)
+                }
+            if isinstance(params.get("entity_ids"), list):
+                entity_ids &= {
+                    entity_id
+                    for item in params["entity_ids"]
+                    if isinstance(item, str)
+                    for entity_id in (item,)
+                }
+            if isinstance(params.get("tags"), dict):
+                requested_tags = {
+                    key: value
+                    for key, value in params["tags"].items()
+                    if isinstance(key, str) and isinstance(value, str)
+                }
+
+        series: list[dict[str, Any]] = []
+        for entity_id in sorted(entity_ids):
+            for metric_key in sorted(metric_keys):
+                if self.metric_high_cardinality and metric_key == "custom.rate":
+                    series.extend(
+                        self._high_cardinality_metric_series(entity_id, requested_tags)
+                    )
+                    continue
+                candidate = self._metric_series(metric_key, entity_id)
+                if requested_tags.items() <= candidate["tags"].items():
+                    series.append(candidate)
+        return series
+
+    @staticmethod
+    def _metric_series(metric_key: str, entity_id: str) -> dict[str, Any]:
+        """Build one sanitized Metric series with a single current point."""
+        values: dict[str, float | int | None] = {
+            "custom.rate": 12.5,
+            "custom.counter": 42,
+            "custom.empty": None,
+        }
+        tags = (
+            {"region": "fixture", "scope": "node"}
+            if metric_key == "custom.rate"
+            else {}
+        )
+        result: dict[str, Any] = {
+            "metric_key": metric_key,
+            "entity_id": entity_id,
+            "tags": tags,
+            "points": [{"time": "2026-08-26T00:00:00Z", "value": values[metric_key]}],
+        }
+        if metric_key == "custom.rate":
+            result["labels"] = {"display_name": "ignored by identity"}
+        return result
+
+    @staticmethod
+    def _high_cardinality_metric_series(
+        entity_id: str,
+        requested_tags: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """Return 129 distinct tag identities for local entity-limit acceptance."""
+        return [
+            {
+                "metric_key": "custom.rate",
+                "entity_id": entity_id,
+                "tags": {"scope": "node", "series": str(index)},
+                "points": [{"time": "2026-08-26T00:00:00Z", "value": index}],
+            }
+            for index in range(METRIC_HIGH_CARDINALITY_SERIES)
+            if requested_tags.items() <= {"scope": "node", "series": str(index)}.items()
+        ]
+
 
 def create_app(panel: FakeKomariPanel) -> web.Application:
     """Create one local-only fake panel application."""
@@ -316,6 +439,14 @@ def create_app(panel: FakeKomariPanel) -> web.Application:
                     "jsonrpc": "2.0",
                     "id": request_id,
                     "error": {"code": -32000, "message": "Simulated Ping failure"},
+                }
+            )
+        if panel.metric_failing and method in METRIC_METHODS:
+            return web.json_response(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {"code": -32000, "message": "Simulated Metric failure"},
                 }
             )
         try:
@@ -380,6 +511,16 @@ def create_app(panel: FakeKomariPanel) -> web.Application:
         panel.ping_failing = False
         return web.json_response({"ping_failing": False})
 
+    async def fail_metrics(request: web.Request) -> web.Response:
+        """Fail only the optional Metric RPC methods."""
+        panel.metric_failing = True
+        return web.json_response({"metric_failing": True})
+
+    async def recover_metrics(request: web.Request) -> web.Response:
+        """Recover only the optional Metric RPC methods."""
+        panel.metric_failing = False
+        return web.json_response({"metric_failing": False})
+
     async def method_not_found(request: web.Request) -> web.Response:
         """Make the preferred Ping stats method return Method Not Found."""
         panel.method_not_found.add("public:getPingMetricStats")
@@ -389,6 +530,36 @@ def create_app(panel: FakeKomariPanel) -> web.Application:
         """Restore the preferred Ping stats method."""
         panel.method_not_found.discard("public:getPingMetricStats")
         return web.json_response({"method_not_found": False})
+
+    async def metric_method_not_found(request: web.Request) -> web.Response:
+        """Make the dynamic Metric query RPC report Method Not Found."""
+        panel.method_not_found.add("public:queryMetrics")
+        return web.json_response({"metric_method_not_found": True})
+
+    async def restore_metric_method(request: web.Request) -> web.Response:
+        """Restore the dynamic Metric query RPC."""
+        panel.method_not_found.discard("public:queryMetrics")
+        return web.json_response({"metric_method_not_found": False})
+
+    async def malformed_metrics(request: web.Request) -> web.Response:
+        """Return a deliberately malformed Metric query envelope."""
+        panel.metric_malformed = True
+        return web.json_response({"metric_malformed": True})
+
+    async def restore_metrics(request: web.Request) -> web.Response:
+        """Restore valid Metric query envelopes."""
+        panel.metric_malformed = False
+        return web.json_response({"metric_malformed": False})
+
+    async def high_cardinality_metrics(request: web.Request) -> web.Response:
+        """Return more dynamic series than Home Assistant may register."""
+        panel.metric_high_cardinality = True
+        return web.json_response({"metric_high_cardinality": True})
+
+    async def restore_metric_cardinality(request: web.Request) -> web.Response:
+        """Return the normal bounded Metric series set."""
+        panel.metric_high_cardinality = False
+        return web.json_response({"metric_high_cardinality": False})
 
     async def add_delay(request: web.Request) -> web.Response:
         """Add a short deterministic response delay."""
@@ -416,8 +587,18 @@ def create_app(panel: FakeKomariPanel) -> web.Application:
     app.router.add_post("/_control/rename-task", rename_task)
     app.router.add_post("/_control/fail-ping", fail_ping)
     app.router.add_post("/_control/recover-ping", recover_ping)
+    app.router.add_post("/_control/fail-metrics", fail_metrics)
+    app.router.add_post("/_control/recover-metrics", recover_metrics)
     app.router.add_post("/_control/method-not-found", method_not_found)
     app.router.add_post("/_control/restore-method", restore_method)
+    app.router.add_post("/_control/metric-method-not-found", metric_method_not_found)
+    app.router.add_post("/_control/restore-metric-method", restore_metric_method)
+    app.router.add_post("/_control/malformed-metrics", malformed_metrics)
+    app.router.add_post("/_control/restore-metrics", restore_metrics)
+    app.router.add_post("/_control/high-cardinality-metrics", high_cardinality_metrics)
+    app.router.add_post(
+        "/_control/restore-metric-cardinality", restore_metric_cardinality
+    )
     app.router.add_post("/_control/delay", add_delay)
     app.router.add_post("/_control/clear-delay", clear_delay)
     app.router.add_post("/_control/rotate-key", rotate_key)

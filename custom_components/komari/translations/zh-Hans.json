@@ -84,6 +84,35 @@
           "ping_stat_keys": "统计项"
         }
       },
+      "metrics": {
+        "title": "动态指标",
+        "description": "最多选择 8 个可保留的自定义指标；后续发现的新指标不会自动加入。",
+        "data": {
+          "metric_interval": "动态指标周期",
+          "metric_keys": "监控的指标"
+        }
+      },
+      "metric_filters": {
+        "title": "指标标签筛选",
+        "description": "可按指标名称填写精确标签筛选对象。无效筛选不会被放宽为不带筛选的查询。",
+        "data": {
+          "metric_tag_filters": "精确标签筛选"
+        }
+      },
+      "metric_preview": {
+        "title": "预览动态指标",
+        "description": "当前选择最多创建 {entity_count} 个动态指标实体；每个面板上限为 {entity_limit} 个。",
+        "data": {
+          "confirm": "保存并重载当前面板"
+        }
+      },
+      "metrics_unavailable": {
+        "title": "动态指标不可用",
+        "description": "当前面板未同时提供两个 Metric RPC 方法。除非明确清除，已有选择会继续保留。",
+        "data": {
+          "clear_saved_metric_selections": "清除已保存的动态指标选择"
+        }
+      },
       "confirm": {
         "title": "确认 Komari 选项",
         "description": "当前选择最多创建 {entity_count} 个 Ping 实体；每个面板上限为 {entity_limit} 个。",
@@ -99,6 +128,10 @@
       "ping_stats_required": "请至少选择一个 Ping 统计项。",
       "invalid_ping_stat": "一个或多个 Ping 统计项无效。",
       "too_many_ping_entities": "当前选择超过 256 个 Ping 实体的上限。",
+      "too_many_metrics": "最多只能选择 8 个动态指标。",
+      "invalid_metric_filter": "一个或多个指标标签筛选无效。",
+      "too_many_metric_entities": "当前选择超过 128 个动态指标实体的上限。",
+      "metric_preview_failed": "面板无法预览所选动态指标。请检查筛选条件后重试。",
       "not_confirmed": "请确认预估结果后再保存。"
     }
   },
@@ -286,6 +319,22 @@
     "tls_verification_disabled": {
       "title": "Komari 的 TLS 证书验证已关闭",
       "description": "**{entry_title}** 的 HTTPS 连接不会验证服务器证书。如果这不是临时测试环境，请重新配置集成并启用 TLS 验证。"
+    },
+    "metric_capability_unavailable": {
+      "title": "Komari 动态指标不可用",
+      "description": "Komari 面板 **{entry_title}** 当前未同时提供两个 Metric RPC 方法。已有选择会保留，并在能力恢复后自动继续使用。"
+    },
+    "selected_metric_missing": {
+      "title": "已选择的 Komari 指标缺失",
+      "description": "Komari 面板 **{entry_title}** 不再列出其中 {missing_count} 个已选动态指标。请在面板中恢复它们，或在集成选项中移除。"
+    },
+    "metric_configuration_invalid": {
+      "title": "Komari 动态指标配置无效",
+      "description": "**{entry_title}** 中有 {invalid_count} 个已保存的动态指标选择或标签筛选无效。无效选择会被禁用，不会在移除筛选后继续查询。请检查集成选项。"
+    },
+    "metric_entity_limit_exceeded": {
+      "title": "Komari 动态指标实体数量超过上限",
+      "description": "**{entry_title}** 发现 {entity_count} 个动态指标实体，超过每个面板 {entity_limit} 个的上限。会优先保留已有实体，超出部分不会创建。请减少所选指标或添加标签筛选。"
     }
   }
 }

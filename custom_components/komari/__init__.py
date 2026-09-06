@@ -20,6 +20,7 @@ from .lifecycle import (
     node_uuid_from_identifiers,
     registry_node_ids,
     registry_ping_task_ids,
+    remove_disallowed_metric_entities,
     remove_disallowed_ping_entities,
     remove_node_registry_entries,
 )
@@ -96,6 +97,11 @@ async def async_setup_entry(
         allowed_task_ids=options.ping_task_ids,
         allowed_stat_keys=options.ping_stat_keys,
     )
+    remove_disallowed_metric_entities(
+        entity_registry,
+        entry.entry_id,
+        allowed_metric_keys=options.metric_keys,
+    )
 
     panel = register_devices(hass, entry, coordinator.data)
     entry.runtime_data = KomariRuntimeData(
@@ -120,6 +126,12 @@ async def async_setup_entry(
             allowed_task_ids=options.ping_task_ids,
             allowed_stat_keys=options.ping_stat_keys,
             confirmed_removed_task_ids=(coordinator.confirmed_removed_ping_task_ids),
+        )
+        remove_disallowed_metric_entities(
+            entity_registry,
+            entry.entry_id,
+            allowed_metric_keys=options.metric_keys,
+            confirmed_removed_metric_keys=(coordinator.confirmed_removed_metric_keys),
         )
         update_repairs(hass, entry)
 

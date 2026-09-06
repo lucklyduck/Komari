@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, override
 
 import voluptuous as vol
@@ -18,6 +19,7 @@ from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
+    ObjectSelector,
     SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
@@ -31,24 +33,34 @@ from yarl import URL
 from .api import KomariApiClient, select_ping_stats_method
 from .const import (
     API_PATH,
+    BUILT_IN_METRIC_KEYS,
     CONF_API_KEY,
     CONF_ENABLE_EXPIRY_ENTITIES,
     CONF_ENABLE_TRAFFIC_ENTITIES,
+    CONF_METRIC_INTERVAL,
+    CONF_METRIC_KEYS,
+    CONF_METRIC_TAG_FILTERS,
     CONF_PING_INTERVAL,
     CONF_PING_STAT_KEYS,
     CONF_PING_TASK_IDS,
     CONF_SCAN_INTERVAL,
     DEFAULT_VERIFY_SSL,
     DOMAIN,
+    DYNAMIC_METRIC_METHODS,
+    MAX_METRIC_ENTITIES,
+    MAX_METRIC_INTERVAL,
+    MAX_METRIC_KEYS,
     MAX_PING_ENTITIES,
     MAX_PING_INTERVAL,
     MAX_PING_TASKS,
     MAX_SCAN_INTERVAL,
     METHOD_PUBLIC_PING_TASKS,
+    MIN_METRIC_INTERVAL,
     MIN_PING_INTERVAL,
     MIN_SCAN_INTERVAL,
     PING_STAT_KEYS,
     PING_STATS_METHODS,
+    SUPPORTED_DYNAMIC_METRIC_TYPES,
 )
 from .exceptions import (
     KomariAuthenticationError,
@@ -62,8 +74,6 @@ from .exceptions import (
 from .options import KomariOptions, get_options
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from .models import KomariBootstrapData
 
 _LOGGER = logging.getLogger(__name__)
@@ -350,6 +360,7 @@ class KomariOptionsFlow(OptionsFlowWithReload):
     def __init__(self) -> None:
         """Initialize one options transaction."""
         self._pending: dict[str, object] = {}
+        self._metric_preview_count: int | None = None
 
     def _ensure_pending(self) -> None:
         """Seed pending values once from normalized current options."""
@@ -373,12 +384,105 @@ class KomariOptionsFlow(OptionsFlowWithReload):
             and snapshot.ping_tasks
         )
 
+    def _has_dynamic_metrics(self) -> bool:
+        """Return whether both Metric RPC methods are currently available."""
+        snapshot = self._snapshot
+        return bool(
+            snapshot is not None
+            and DYNAMIC_METRIC_METHODS.issubset(snapshot.capabilities)
+        )
+
     def _selected_values(self, key: str) -> tuple[str, ...]:
         """Return one pending multi-select value with a concrete type."""
         value = self._pending.get(key)
         if not isinstance(value, list | tuple):
             return ()
         return tuple(str(item) for item in value)
+
+    def _metric_definitions(self) -> dict[str, Any]:
+        """Return the currently selectable retained custom Metric definitions."""
+        snapshot = self._snapshot
+        definitions = getattr(snapshot, "metric_definitions", {})
+        if not isinstance(definitions, Mapping):
+            return {}
+        return {
+            metric_key: definition
+            for metric_key, definition in definitions.items()
+            if isinstance(metric_key, str)
+            and metric_key not in BUILT_IN_METRIC_KEYS
+            and getattr(definition, "metric_type", None)
+            in SUPPORTED_DYNAMIC_METRIC_TYPES
+            and getattr(definition, "retention_days", 0) > 0
+        }
+
+    def _metric_selection_options(self) -> list[SelectOptionDict]:
+        """Build real Definition choices while preserving old unavailable keys."""
+        definitions = self._metric_definitions()
+        options = [
+            SelectOptionDict(
+                value=metric_key,
+                label=self._metric_label(metric_key, definition),
+            )
+            for metric_key, definition in sorted(definitions.items())
+        ]
+        available = frozenset(definitions)
+        options.extend(
+            SelectOptionDict(value=metric_key, label=f"{metric_key} (unavailable)")
+            for metric_key in self._selected_values(CONF_METRIC_KEYS)
+            if metric_key not in available
+        )
+        return options
+
+    def _metric_label(self, metric_key: str, definition: Any) -> str:
+        """Return a stable human label without changing a Metric's identity."""
+        description = getattr(definition, "description", None)
+        if isinstance(description, str) and description.strip():
+            return f"{description.strip()} ({metric_key})"
+        if isinstance(description, Mapping):
+            language = self.hass.config.language
+            language_candidates = (
+                language,
+                language.split("-", 1)[0],
+                "en",
+            )
+            for candidate in language_candidates:
+                value = description.get(candidate)
+                if isinstance(value, str) and value.strip():
+                    return f"{value.strip()} ({metric_key})"
+            for _, value in sorted(description.items()):
+                if isinstance(value, str) and value.strip():
+                    return f"{value.strip()} ({metric_key})"
+        return metric_key
+
+    def _ping_entity_estimate(self) -> int:
+        """Estimate only currently discoverable Ping entities."""
+        snapshot = self._snapshot
+        if snapshot is None or not self._has_ping():
+            return 0
+        selected_task_count = sum(
+            task_id in snapshot.ping_tasks
+            for task_id in self._selected_values(CONF_PING_TASK_IDS)
+        )
+        return (
+            len(snapshot.nodes)
+            * selected_task_count
+            * len(self._selected_values(CONF_PING_STAT_KEYS))
+        )
+
+    async def _async_continue_after_ping(self) -> ConfigFlowResult:
+        """Continue into optional Metric configuration after Ping choices."""
+        if self._has_dynamic_metrics() and (
+            self._metric_definitions() or self._selected_values(CONF_METRIC_KEYS)
+        ):
+            return await self.async_step_metrics()
+        if self._selected_values(CONF_METRIC_KEYS):
+            return await self.async_step_metrics_unavailable()
+        return await self.async_step_confirm()
+
+    def _create_options_entry(self) -> ConfigFlowResult:
+        """Persist a fully normalized options payload exactly once."""
+        options = KomariOptions.from_mapping(self._pending)
+        return self.async_create_entry(title="", data=options.as_dict())
 
     async def async_step_init(
         self,
@@ -438,8 +542,7 @@ class KomariOptionsFlow(OptionsFlowWithReload):
             self._pending.update(user_input)
             if self._has_ping():
                 return await self.async_step_ping_tasks()
-            self._pending[CONF_PING_TASK_IDS] = []
-            return await self.async_step_confirm()
+            return await self._async_continue_after_ping()
 
         return self.async_show_form(
             step_id="entities",
@@ -484,7 +587,7 @@ class KomariOptionsFlow(OptionsFlowWithReload):
                 else:
                     self._pending[CONF_PING_TASK_IDS] = list(selected)
                     if not selected:
-                        return await self.async_step_confirm()
+                        return await self._async_continue_after_ping()
                     return await self.async_step_ping_stats()
 
         task_options = [
@@ -524,7 +627,7 @@ class KomariOptionsFlow(OptionsFlowWithReload):
                 errors["base"] = "invalid_ping_stat"
             else:
                 self._pending[CONF_PING_STAT_KEYS] = list(selected)
-                return await self.async_step_confirm()
+                return await self._async_continue_after_ping()
 
         return self.async_show_form(
             step_id="ping_stats",
@@ -546,18 +649,250 @@ class KomariOptionsFlow(OptionsFlowWithReload):
             errors=errors,
         )
 
+    async def async_step_metrics(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> ConfigFlowResult:
+        """Select retained custom Metrics and their isolated polling interval."""
+        if not self._has_dynamic_metrics():
+            if self._selected_values(CONF_METRIC_KEYS):
+                return await self.async_step_metrics_unavailable()
+            return await self.async_step_confirm()
+
+        selection_options = self._metric_selection_options()
+        if not selection_options:
+            return await self.async_step_confirm()
+
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            raw_selected = user_input.get(CONF_METRIC_KEYS, [])
+            if not isinstance(raw_selected, list | tuple) or any(
+                not isinstance(metric_key, str) for metric_key in raw_selected
+            ):
+                errors["base"] = "too_many_metrics"
+            else:
+                selected = tuple(raw_selected)
+                allowed = {str(option["value"]) for option in selection_options}
+                if (
+                    len(selected) > MAX_METRIC_KEYS
+                    or len(set(selected)) != len(selected)
+                    or any(metric_key not in allowed for metric_key in selected)
+                ):
+                    errors["base"] = "too_many_metrics"
+                else:
+                    self._pending[CONF_METRIC_INTERVAL] = user_input.get(
+                        CONF_METRIC_INTERVAL,
+                        self._pending[CONF_METRIC_INTERVAL],
+                    )
+                    self._pending[CONF_METRIC_KEYS] = list(selected)
+                    previous_filters = self._pending.get(CONF_METRIC_TAG_FILTERS, {})
+                    self._pending[CONF_METRIC_TAG_FILTERS] = (
+                        {
+                            metric_key: tags
+                            for metric_key, tags in previous_filters.items()
+                            if metric_key in selected
+                        }
+                        if isinstance(previous_filters, Mapping)
+                        else {}
+                    )
+                    self._metric_preview_count = None
+                    if not selected:
+                        return await self.async_step_confirm()
+                    return await self.async_step_metric_filters()
+
+        return self.async_show_form(
+            step_id="metrics",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_METRIC_INTERVAL,
+                        default=self._pending[CONF_METRIC_INTERVAL],
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=MIN_METRIC_INTERVAL,
+                            max=MAX_METRIC_INTERVAL,
+                            step=1,
+                            mode=NumberSelectorMode.BOX,
+                            unit_of_measurement="s",
+                        )
+                    ),
+                    vol.Required(
+                        CONF_METRIC_KEYS,
+                        default=self._pending[CONF_METRIC_KEYS],
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=selection_options,
+                            multiple=True,
+                            mode=SelectSelectorMode.LIST,
+                        )
+                    ),
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_metrics_unavailable(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> ConfigFlowResult:
+        """Preserve saved Metric choices while the optional API is unavailable."""
+        if user_input is not None:
+            if user_input.get("clear_saved_metric_selections", False):
+                self._pending[CONF_METRIC_KEYS] = []
+                self._pending[CONF_METRIC_TAG_FILTERS] = {}
+            return await self.async_step_confirm()
+
+        return self.async_show_form(
+            step_id="metrics_unavailable",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        "clear_saved_metric_selections",
+                        default=False,
+                    ): BooleanSelector()
+                }
+            ),
+        )
+
+    async def async_step_metric_filters(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> ConfigFlowResult:
+        """Capture exact Metric tag filters without allowing broad fallback."""
+        selected = self._selected_values(CONF_METRIC_KEYS)
+        if not selected:
+            return await self.async_step_confirm()
+
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            raw_filters = user_input.get(CONF_METRIC_TAG_FILTERS, {})
+            candidate = dict(self._pending)
+            candidate[CONF_METRIC_TAG_FILTERS] = raw_filters
+            normalized = KomariOptions.from_mapping(candidate)
+            if (
+                not isinstance(raw_filters, Mapping)
+                or any(
+                    not isinstance(metric_key, str) or metric_key not in selected
+                    for metric_key in raw_filters
+                )
+                or normalized.metric_configuration_invalid
+                or bool(normalized.invalid_metric_filter_keys & frozenset(selected))
+            ):
+                errors["base"] = "invalid_metric_filter"
+            else:
+                self._pending[CONF_METRIC_TAG_FILTERS] = normalized.as_dict()[
+                    CONF_METRIC_TAG_FILTERS
+                ]
+                self._metric_preview_count = None
+                return await self.async_step_metric_preview()
+
+        return self.async_show_form(
+            step_id="metric_filters",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_METRIC_TAG_FILTERS,
+                        default=self._pending[CONF_METRIC_TAG_FILTERS],
+                    ): ObjectSelector()
+                }
+            ),
+            errors=errors,
+        )
+
+    async def _async_metric_preview(self) -> int:
+        """Issue bounded read-only queries and return viable dynamic entities."""
+        snapshot = self._snapshot
+        runtime_data = getattr(self.config_entry, "runtime_data", None)
+        client = getattr(runtime_data, "client", None)
+        if (
+            snapshot is None
+            or client is None
+            or not DYNAMIC_METRIC_METHODS.issubset(snapshot.capabilities)
+        ):
+            raise KomariUnsupportedError("Metric preview is unavailable")
+
+        options = KomariOptions.from_mapping(self._pending)
+        definitions = self._metric_definitions()
+        groups: dict[tuple[tuple[str, str], ...], list[str]] = {}
+        for metric_key in options.metric_keys:
+            if metric_key in options.invalid_metric_filter_keys:
+                continue
+            if metric_key not in definitions:
+                continue
+            tags = options.metric_tag_filters.get(metric_key, {})
+            groups.setdefault(tuple(sorted(tags.items())), []).append(metric_key)
+
+        if not groups or not snapshot.nodes:
+            return 0
+        if len(groups) > MAX_METRIC_KEYS:
+            raise KomariProtocolError("Metric preview has too many filter groups")
+
+        series_keys: set[object] = set()
+        for canonical_tags, metric_keys in groups.items():
+            values = await client.async_query_metrics(
+                snapshot.capabilities,
+                metric_keys=tuple(metric_keys),
+                entity_ids=tuple(snapshot.nodes),
+                tags=dict(canonical_tags),
+                hours=4,
+                max_points=1,
+                aggregation="last",
+                fill_empty=False,
+            )
+            series_keys.update(
+                series_key
+                for series_key, value in values.items()
+                if series_key.entity_id in snapshot.nodes
+                and series_key.metric_key in metric_keys
+                and value.value is not None
+            )
+        return len(series_keys)
+
+    async def async_step_metric_preview(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> ConfigFlowResult:
+        """Show an enforced read-only Metric entity estimate before saving."""
+        errors: dict[str, str] = {}
+        if self._metric_preview_count is None:
+            try:
+                self._metric_preview_count = await self._async_metric_preview()
+            except Exception:
+                _LOGGER.debug(
+                    "Unable to preview selected Metric entities",
+                    exc_info=True,
+                )
+                errors["base"] = "metric_preview_failed"
+
+        estimate = self._metric_preview_count or 0
+        if not errors and estimate > MAX_METRIC_ENTITIES:
+            errors["base"] = "too_many_metric_entities"
+        elif not errors and self._ping_entity_estimate() > MAX_PING_ENTITIES:
+            errors["base"] = "too_many_ping_entities"
+        elif user_input is not None:
+            if not user_input.get("confirm"):
+                errors["base"] = "not_confirmed"
+            else:
+                return self._create_options_entry()
+
+        return self.async_show_form(
+            step_id="metric_preview",
+            data_schema=vol.Schema(
+                {vol.Required("confirm", default=False): BooleanSelector()}
+            ),
+            description_placeholders={
+                "entity_count": str(estimate),
+                "entity_limit": str(MAX_METRIC_ENTITIES),
+            },
+            errors=errors,
+        )
+
     async def async_step_confirm(
         self,
         user_input: dict[str, Any] | None = None,
     ) -> ConfigFlowResult:
         """Preview the maximum Ping entity count and save once."""
-        snapshot = self._snapshot
-        node_count = len(snapshot.nodes) if snapshot is not None else 0
-        estimate = (
-            node_count
-            * len(self._selected_values(CONF_PING_TASK_IDS))
-            * len(self._selected_values(CONF_PING_STAT_KEYS))
-        )
+        estimate = self._ping_entity_estimate()
         errors: dict[str, str] = {}
         if estimate > MAX_PING_ENTITIES:
             errors["base"] = "too_many_ping_entities"
@@ -565,8 +900,7 @@ class KomariOptionsFlow(OptionsFlowWithReload):
             if not user_input.get("confirm"):
                 errors["base"] = "not_confirmed"
             else:
-                options = KomariOptions.from_mapping(self._pending)
-                return self.async_create_entry(title="", data=options.as_dict())
+                return self._create_options_entry()
 
         return self.async_show_form(
             step_id="confirm",

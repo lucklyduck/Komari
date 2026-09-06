@@ -11,6 +11,9 @@ PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.SENSOR]
 CONF_API_KEY = "api_key"
 CONF_ENABLE_EXPIRY_ENTITIES = "enable_expiry_entities"
 CONF_ENABLE_TRAFFIC_ENTITIES = "enable_traffic_entities"
+CONF_METRIC_INTERVAL = "metric_interval"
+CONF_METRIC_KEYS = "metric_keys"
+CONF_METRIC_TAG_FILTERS = "metric_tag_filters"
 CONF_PING_INTERVAL = "ping_interval"
 CONF_PING_STAT_KEYS = "ping_stat_keys"
 CONF_PING_TASK_IDS = "ping_task_ids"
@@ -19,6 +22,7 @@ CONF_SCAN_INTERVAL = "scan_interval"
 DEFAULT_VERIFY_SSL = True
 DEFAULT_ENABLE_EXPIRY_ENTITIES = True
 DEFAULT_ENABLE_TRAFFIC_ENTITIES = True
+DEFAULT_METRIC_INTERVAL = 600
 DEFAULT_PING_INTERVAL = 300
 DEFAULT_PING_STAT_KEYS = ("latest", "loss")
 DEFAULT_SCAN_INTERVAL_SECONDS = 30
@@ -29,9 +33,25 @@ MIN_PING_INTERVAL = 60
 MAX_PING_INTERVAL = 1800
 MAX_PING_TASKS = 8
 MAX_PING_ENTITIES = 256
+MIN_METRIC_INTERVAL = 300
+MAX_METRIC_INTERVAL = 3600
+MAX_METRIC_KEYS = 8
+MAX_METRIC_DEFINITIONS = 256
+MAX_METRIC_SERIES = 512
+MAX_METRIC_POINTS_PER_SERIES = 128
+MAX_METRIC_ENTITIES = 128
+MAX_METRIC_TAGS = 16
+MAX_METRIC_TAG_KEY_LENGTH = 64
+MAX_METRIC_TAG_VALUE_LENGTH = 256
+MAX_METRIC_FILTERS_JSON_BYTES = 4096
+MAX_METRIC_RESPONSE_BYTES = 2 * 1024 * 1024
 AUTHORITATIVE_MISSING_THRESHOLD = 3
 PING_QUERY_HOURS = 1
 PING_QUERY_MAX_POINTS = 120
+METRIC_QUERY_HOURS = 4
+METRIC_QUERY_MAX_POINTS = 1
+METRIC_QUERY_AGGREGATION = "last"
+METRIC_QUERY_FILL_EMPTY = False
 PING_STAT_KEYS = (
     "latest",
     "loss",
@@ -49,6 +69,7 @@ DEFAULT_CONNECT_TIMEOUT = 10.0
 DEFAULT_SCAN_INTERVAL = timedelta(seconds=DEFAULT_SCAN_INTERVAL_SECONDS)
 INVENTORY_REFRESH_INTERVAL = timedelta(minutes=10)
 PING_TASK_REFRESH_INTERVAL = timedelta(minutes=10)
+METRIC_DEFINITION_REFRESH_INTERVAL = timedelta(minutes=10)
 CAPABILITY_REFRESH_INTERVAL = timedelta(hours=6)
 
 METHOD_PING = "rpc.ping"
@@ -64,6 +85,8 @@ METHOD_LATEST_STATUS = "common:getNodesLatestStatus"
 METHOD_PUBLIC_PING_TASKS = "public:getPublicPingTasks"
 METHOD_PING_METRIC_STATS = "public:getPingMetricStats"
 METHOD_PUBLIC_PING_RECORDS = "public:getPingRecords"
+METHOD_PUBLIC_METRIC_DEFINITIONS = "public:listMetricDefinitions"
+METHOD_PUBLIC_QUERY_METRICS = "public:queryMetrics"
 METHOD_COMMON_RECORDS = "common:getRecords"
 
 PING_STATS_METHODS = frozenset(
@@ -75,3 +98,41 @@ PING_STATS_METHODS = frozenset(
 )
 
 REQUIRED_METHODS = frozenset({METHOD_LATEST_STATUS})
+
+DYNAMIC_METRIC_METHODS = frozenset(
+    {
+        METHOD_PUBLIC_METRIC_DEFINITIONS,
+        METHOD_PUBLIC_QUERY_METRICS,
+    }
+)
+
+SUPPORTED_DYNAMIC_METRIC_TYPES = frozenset(
+    {
+        "gauge",
+        "counter",
+        "histogram",
+        "summary",
+    }
+)
+
+# Metrics represented by the existing core and Ping entities. They are never
+# offered as dynamic selections, preventing duplicate state history.
+BUILT_IN_METRIC_KEYS = frozenset(
+    {
+        "cpu.usage",
+        "gpu.usage",
+        "memory.used",
+        "swap.used",
+        "load.average",
+        "disk.used",
+        "net.in.rate",
+        "net.out.rate",
+        "net.total.up",
+        "net.total.down",
+        "process.count",
+        "connections.tcp",
+        "connections.udp",
+        "ping.latency_ms",
+        "ping.loss",
+    }
+)

@@ -1,0 +1,30 @@
+[
+  {
+    "name": "custom.rate",
+    "description": {
+      "en": "Fixture rate",
+      "zh-Hans": "固定测试速率"
+    },
+    "type": "gauge",
+    "unit": "bytes/s",
+    "retention_days": 7,
+    "metadata": {
+      "source": "fixture"
+    }
+  },
+  {
+    "name": "custom.counter",
+    "description": "Fixture counter",
+    "type": "counter",
+    "unit": "count",
+    "retention_days": 30,
+    "metadata": {}
+  },
+  {
+    "name": "custom.empty",
+    "description": "Fixture empty value",
+    "type": "gauge",
+    "retention_days": 7,
+    "metadata": {}
+  }
+]

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from itertools import count
-from json import JSONDecodeError
+from json import JSONDecodeError, dumps, loads
 from types import MappingProxyType
 from typing import Any
 
@@ -15,6 +15,13 @@ from .const import (
     API_PATH,
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_REQUEST_TIMEOUT,
+    DYNAMIC_METRIC_METHODS,
+    MAX_METRIC_FILTERS_JSON_BYTES,
+    MAX_METRIC_KEYS,
+    MAX_METRIC_RESPONSE_BYTES,
+    MAX_METRIC_TAG_KEY_LENGTH,
+    MAX_METRIC_TAG_VALUE_LENGTH,
+    MAX_METRIC_TAGS,
     METHOD_COMMON_NODES,
     METHOD_COMMON_PUBLIC_INFO,
     METHOD_COMMON_RECORDS,
@@ -22,9 +29,11 @@ from .const import (
     METHOD_LATEST_STATUS,
     METHOD_PING,
     METHOD_PING_METRIC_STATS,
+    METHOD_PUBLIC_METRIC_DEFINITIONS,
     METHOD_PUBLIC_NODES,
     METHOD_PUBLIC_PING_RECORDS,
     METHOD_PUBLIC_PING_TASKS,
+    METHOD_PUBLIC_QUERY_METRICS,
     METHOD_PUBLIC_SETTINGS,
     METHOD_PUBLIC_VERSION,
     METHOD_RPC_METHODS,
@@ -42,12 +51,17 @@ from .exceptions import (
 )
 from .models import (
     KomariBootstrapData,
+    KomariMetricDefinition,
+    KomariMetricSeriesKey,
+    KomariMetricValue,
     KomariNode,
     KomariNodeStatus,
     KomariPanelInfo,
     KomariPingSeriesKey,
     KomariPingStats,
     KomariPingTask,
+    parse_metric_definitions,
+    parse_metric_values,
     parse_nodes,
     parse_panel_info,
     parse_ping_metric_stats,
@@ -102,6 +116,8 @@ class KomariApiClient:
         )
         self._request_ids = count(1)
         self._semaphore = asyncio.Semaphore(max_concurrency)
+        self._last_metric_skipped_series_count = 0
+        self._last_metric_skipped_point_count = 0
 
     @property
     def base_url(self) -> str:
@@ -118,12 +134,26 @@ class KomariApiClient:
         """Return whether an API key is configured."""
         return self._api_key is not None
 
+    @property
+    def last_metric_skipped_series_count(self) -> int:
+        """Return the sanitized skip count from the latest Metric query."""
+        return self._last_metric_skipped_series_count
+
+    @property
+    def last_metric_skipped_point_count(self) -> int:
+        """Return the sanitized point skip count from the latest Metric query."""
+        return self._last_metric_skipped_point_count
+
     async def async_call(
         self,
         method: str,
         params: object | None = None,
+        *,
+        max_response_bytes: int | None = None,
     ) -> Any:
-        """Call one Komari JSON-RPC2 method."""
+        """Call one Komari JSON-RPC2 method with an optional decoded-size cap."""
+        if max_response_bytes is not None and max_response_bytes <= 0:
+            raise ValueError("max_response_bytes must be positive")
         request_id = next(self._request_ids)
         request: dict[str, object] = {
             "jsonrpc": "2.0",
@@ -163,18 +193,49 @@ class KomariApiClient:
                     raise KomariConnectionError(
                         f"Komari returned HTTP {response.status}"
                     )
-                try:
-                    payload = await response.json(content_type=None)
-                except (JSONDecodeError, ValueError) as err:
-                    raise KomariProtocolError(
-                        "Komari returned an invalid JSON response"
-                    ) from err
+                payload = await self._async_read_json_response(
+                    response,
+                    max_response_bytes=max_response_bytes,
+                )
         except TimeoutError as err:
             raise KomariConnectionError("Timed out while contacting Komari") from err
         except ClientError as err:
             raise KomariConnectionError("Unable to contact Komari") from err
 
         return self._parse_rpc_response(payload, request_id)
+
+    @staticmethod
+    async def _async_read_json_response(
+        response: Any,
+        *,
+        max_response_bytes: int | None,
+    ) -> object:
+        """Decode JSON, streaming only responses that need a hard size limit."""
+        if max_response_bytes is None:
+            try:
+                return await response.json(content_type=None)
+            except (JSONDecodeError, ValueError) as err:
+                raise KomariProtocolError(
+                    "Komari returned an invalid JSON response"
+                ) from err
+
+        content_length = getattr(response, "content_length", None)
+        if isinstance(content_length, int) and content_length > max_response_bytes:
+            raise KomariProtocolError("Komari response exceeds safe size limit")
+
+        chunks: list[bytes] = []
+        received = 0
+        try:
+            while chunk := await response.content.read(64 * 1024):
+                received += len(chunk)
+                if received > max_response_bytes:
+                    raise KomariProtocolError("Komari response exceeds safe size limit")
+                chunks.append(chunk)
+            return loads(b"".join(chunks))
+        except (JSONDecodeError, UnicodeDecodeError, ValueError) as err:
+            raise KomariProtocolError(
+                "Komari returned an invalid JSON response"
+            ) from err
 
     async def async_ping(self) -> None:
         """Validate that the endpoint is a Komari RPC2 server."""
@@ -306,6 +367,78 @@ class KomariApiClient:
             }
         )
 
+    async def async_get_metric_definitions(
+        self,
+        capabilities: frozenset[str],
+    ) -> Mapping[str, KomariMetricDefinition]:
+        """Return bounded Metric Definitions when the whole optional API exists."""
+        self._require_dynamic_metric_capabilities(capabilities)
+        return parse_metric_definitions(
+            await self.async_call(
+                METHOD_PUBLIC_METRIC_DEFINITIONS,
+                max_response_bytes=MAX_METRIC_RESPONSE_BYTES,
+            )
+        )
+
+    async def async_query_metrics(
+        self,
+        capabilities: frozenset[str],
+        *,
+        metric_keys: tuple[str, ...],
+        entity_ids: tuple[str, ...],
+        tags: Mapping[str, str],
+        hours: int = 4,
+        max_points: int = 1,
+        aggregation: str = "last",
+        fill_empty: bool = False,
+    ) -> Mapping[KomariMetricSeriesKey, KomariMetricValue]:
+        """Query one exact Metric-filter group without retaining raw points."""
+        self._require_dynamic_metric_capabilities(capabilities)
+        self._validate_metric_query(
+            metric_keys=metric_keys,
+            entity_ids=entity_ids,
+            tags=tags,
+            hours=hours,
+            max_points=max_points,
+            aggregation=aggregation,
+            fill_empty=fill_empty,
+        )
+        if not metric_keys or not entity_ids:
+            self._last_metric_skipped_series_count = 0
+            self._last_metric_skipped_point_count = 0
+            return MappingProxyType({})
+
+        values = parse_metric_values(
+            await self.async_call(
+                METHOD_PUBLIC_QUERY_METRICS,
+                {
+                    "metric_keys": list(metric_keys),
+                    "entity_ids": list(entity_ids),
+                    "tags": dict(tags),
+                    "hours": hours,
+                    "max_points": max_points,
+                    "aggregation": aggregation,
+                    "fill_empty": fill_empty,
+                },
+                max_response_bytes=MAX_METRIC_RESPONSE_BYTES,
+            )
+        )
+        requested_keys = frozenset(metric_keys)
+        requested_nodes = frozenset(entity_ids)
+        requested_tags = frozenset(tags.items())
+        filtered_values = {
+            key: value
+            for key, value in values.items()
+            if key.metric_key in requested_keys
+            and key.entity_id in requested_nodes
+            and requested_tags.issubset(key.tags)
+        }
+        self._last_metric_skipped_series_count = (
+            values.skipped_series_count + len(values) - len(filtered_values)
+        )
+        self._last_metric_skipped_point_count = values.skipped_point_count
+        return MappingProxyType(filtered_values)
+
     async def async_get_metadata(self) -> tuple[KomariPanelInfo, frozenset[str]]:
         """Refresh RPC capabilities, versions, and public panel metadata."""
         rpc_version, capabilities = await asyncio.gather(
@@ -340,6 +473,64 @@ class KomariApiClient:
             statuses=statuses,
             capabilities=capabilities,
         )
+
+    @staticmethod
+    def _require_dynamic_metric_capabilities(capabilities: frozenset[str]) -> None:
+        """Require both methods because either alone cannot form safe entities."""
+        if not DYNAMIC_METRIC_METHODS.issubset(capabilities):
+            raise KomariUnsupportedError(
+                "Komari does not expose the complete dynamic Metric API"
+            )
+
+    @staticmethod
+    def _validate_metric_query(
+        *,
+        metric_keys: tuple[str, ...],
+        entity_ids: tuple[str, ...],
+        tags: Mapping[str, str],
+        hours: int,
+        max_points: int,
+        aggregation: str,
+        fill_empty: bool,
+    ) -> None:
+        """Reject malformed caller input before it can widen a Metric query."""
+        if (
+            len(metric_keys) > MAX_METRIC_KEYS
+            or len(set(metric_keys)) != len(metric_keys)
+            or any(not isinstance(key, str) or not key.strip() for key in metric_keys)
+        ):
+            raise KomariProtocolError("Metric query has invalid metric keys")
+        if any(
+            not isinstance(entity_id, str) or not entity_id.strip()
+            for entity_id in entity_ids
+        ):
+            raise KomariProtocolError("Metric query has invalid entity IDs")
+        if len(tags) > MAX_METRIC_TAGS or any(
+            not isinstance(key, str)
+            or not key
+            or len(key) > MAX_METRIC_TAG_KEY_LENGTH
+            or not isinstance(value, str)
+            or len(value) > MAX_METRIC_TAG_VALUE_LENGTH
+            for key, value in tags.items()
+        ):
+            raise KomariProtocolError("Metric query has invalid tag filters")
+        encoded_tags = dumps(
+            dict(tags), ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        if len(encoded_tags) > MAX_METRIC_FILTERS_JSON_BYTES:
+            raise KomariProtocolError("Metric query tag filters exceed safe limit")
+        if (
+            isinstance(hours, bool)
+            or not isinstance(hours, int)
+            or hours <= 0
+            or isinstance(max_points, bool)
+            or not isinstance(max_points, int)
+            or max_points <= 0
+            or not isinstance(aggregation, str)
+            or aggregation != "last"
+            or not isinstance(fill_empty, bool)
+        ):
+            raise KomariProtocolError("Metric query has invalid aggregation settings")
 
     @staticmethod
     def _select_method(

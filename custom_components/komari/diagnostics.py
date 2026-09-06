@@ -16,9 +16,11 @@ from .const import (
     METHOD_COMMON_RECORDS,
     METHOD_LATEST_STATUS,
     METHOD_PING_METRIC_STATS,
+    METHOD_PUBLIC_METRIC_DEFINITIONS,
     METHOD_PUBLIC_NODES,
     METHOD_PUBLIC_PING_RECORDS,
     METHOD_PUBLIC_PING_TASKS,
+    METHOD_PUBLIC_QUERY_METRICS,
 )
 from .device import panel_identifier
 from .lifecycle import node_uuid_from_identifiers, ping_identity_from_unique_id
@@ -57,6 +59,13 @@ TO_REDACT = {
     "raw",
     "raw_response",
     "response",
+    "metric_key",
+    "metric_keys",
+    "metric_tag_filters",
+    "tags",
+    "labels",
+    "metadata",
+    "points",
 }
 
 EXPIRY_ENTITY_KEYS = frozenset(
@@ -152,10 +161,35 @@ async def async_get_config_entry_diagnostics(
         "options": {
             "scan_interval": options.scan_interval,
             "ping_interval": options.ping_interval,
+            "metric_interval": options.metric_interval,
             "expiry_entities_enabled": options.enable_expiry_entities,
             "traffic_entities_enabled": options.enable_traffic_entities,
             "selected_ping_task_count": len(options.ping_task_ids),
             "selected_ping_stat_count": len(options.ping_stat_keys),
+            "selected_metric_count": len(options.metric_keys),
+            "invalid_metric_filter_count": len(options.invalid_metric_filter_keys),
+        },
+        "metrics": {
+            "definition_count": len(snapshot.metric_definitions),
+            "selected_definition_count": len(
+                frozenset(options.metric_keys) & snapshot.metric_definitions.keys()
+            ),
+            "active_series_count": len(snapshot.metric_values),
+            "values_available": coordinator.metric_values_available,
+            "confirmed_removed_definition_count": len(
+                coordinator.confirmed_removed_metric_keys
+            ),
+            "configuration_invalid": options.metric_configuration_invalid,
+            "skipped_series_count": getattr(
+                coordinator,
+                "metric_skipped_series_count",
+                0,
+            ),
+            "skipped_point_count": getattr(
+                coordinator,
+                "metric_skipped_point_count",
+                0,
+            ),
         },
         "branches": {
             branch: _branch_diagnostics(state)
@@ -225,6 +259,8 @@ def _capability_diagnostics(capabilities: frozenset[str]) -> dict[str, bool]:
         "ping_metric_stats": METHOD_PING_METRIC_STATS in capabilities,
         "ping_public_records": METHOD_PUBLIC_PING_RECORDS in capabilities,
         "ping_common_records": METHOD_COMMON_RECORDS in capabilities,
+        "metric_definitions": METHOD_PUBLIC_METRIC_DEFINITIONS in capabilities,
+        "metric_values": METHOD_PUBLIC_QUERY_METRICS in capabilities,
     }
 
 
@@ -247,15 +283,23 @@ def _entity_counts(
     entry_id: str,
 ) -> dict[str, int]:
     """Count optional entity families without returning any entity identity."""
-    expiry = traffic = ping = 0
+    expiry = traffic = ping = metric = 0
     for item in er.async_entries_for_config_entry(registry, entry_id):
         if ping_identity_from_unique_id(entry_id, item.unique_id) is not None:
             ping += 1
             continue
+        if ":metric:" in item.unique_id:
+            metric += 1
+            continue
         key = item.unique_id.rsplit(":", 1)[-1]
         expiry += key in EXPIRY_ENTITY_KEYS
         traffic += key in TRAFFIC_ENTITY_KEYS
-    return {"expiry": expiry, "traffic": traffic, "ping": ping}
+    return {
+        "expiry": expiry,
+        "traffic": traffic,
+        "ping": ping,
+        "metric": metric,
+    }
 
 
 def _node_entity_count(

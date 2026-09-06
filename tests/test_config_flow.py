@@ -244,9 +244,16 @@ async def test_reauth_updates_only_current_api_key(hass: HomeAssistant) -> None:
     original_entry_id = entry.entry_id
     original_data = dict(entry.data)
 
-    with patch(
-        "custom_components.komari.config_flow.KomariApiClient.async_get_bootstrap",
-        new=AsyncMock(return_value=_bootstrap()),
+    with (
+        patch(
+            "custom_components.komari.config_flow.KomariApiClient.async_get_bootstrap",
+            new=AsyncMock(return_value=_bootstrap()),
+        ),
+        patch.object(
+            hass.config_entries,
+            "async_reload",
+            new=AsyncMock(return_value=True),
+        ) as async_reload,
     ):
         result = await hass.config_entries.flow.async_init(
             DOMAIN,
@@ -264,9 +271,11 @@ async def test_reauth_updates_only_current_api_key(hass: HomeAssistant) -> None:
         result = await hass.config_entries.flow.async_configure(
             flow_id, {CONF_API_KEY: "  replacement-key  "}
         )
+        await hass.async_block_till_done()
 
     assert result.get("type") is FlowResultType.ABORT
     assert result.get("reason") == "reauth_successful"
+    async_reload.assert_awaited_once_with(entry.entry_id)
     assert entry.entry_id == original_entry_id
     assert entry.title == "Primary panel"
     assert entry.data == {

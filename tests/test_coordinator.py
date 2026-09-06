@@ -3,23 +3,30 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, cast
 
 import pytest
 from custom_components.komari.const import (
+    CONF_METRIC_INTERVAL,
+    CONF_METRIC_KEYS,
+    CONF_METRIC_TAG_FILTERS,
     CONF_PING_INTERVAL,
     CONF_PING_TASK_IDS,
     DEFAULT_SCAN_INTERVAL,
     METHOD_COMMON_RECORDS,
     METHOD_LATEST_STATUS,
     METHOD_PING_METRIC_STATS,
+    METHOD_PUBLIC_METRIC_DEFINITIONS,
     METHOD_PUBLIC_NODES,
     METHOD_PUBLIC_PING_RECORDS,
     METHOD_PUBLIC_PING_TASKS,
+    METHOD_PUBLIC_QUERY_METRICS,
 )
 from custom_components.komari.coordinator import (
     BRANCH_CAPABILITIES,
+    BRANCH_METRIC_DEFINITIONS,
+    BRANCH_METRIC_VALUES,
     BRANCH_PING_STATS,
     BRANCH_PING_TASKS,
     KomariDataUpdateCoordinator,
@@ -40,12 +47,16 @@ from custom_components.komari.exceptions import (
 )
 from custom_components.komari.models import (
     KomariBootstrapData,
+    KomariMetricDefinition,
+    KomariMetricSeriesKey,
+    KomariMetricValue,
     KomariNode,
     KomariNodeStatus,
     KomariPanelInfo,
     KomariPingSeriesKey,
     KomariPingStats,
     KomariPingTask,
+    parse_metric_definitions,
     parse_nodes,
     parse_ping_metric_stats,
     parse_ping_tasks,
@@ -118,6 +129,41 @@ def _bootstrap(
     )
 
 
+def _metric_definitions(
+    *metric_keys: str,
+) -> Mapping[str, KomariMetricDefinition]:
+    """Build retained gauge definitions suitable for dynamic entity creation."""
+    return parse_metric_definitions(
+        [
+            {
+                "name": metric_key,
+                "description": metric_key,
+                "type": "gauge",
+                "unit": "count",
+                "retention_days": 7,
+            }
+            for metric_key in metric_keys
+        ]
+    )
+
+
+def _metric_value(
+    metric_key: str,
+    node_uuid: str = "node-1",
+    *,
+    tags: tuple[tuple[str, str], ...] = (),
+    value: float | None = 1.0,
+) -> tuple[KomariMetricSeriesKey, KomariMetricValue]:
+    """Build one normalized Metric series without raw protocol payloads."""
+    return (
+        KomariMetricSeriesKey(metric_key, node_uuid, tags),
+        KomariMetricValue(
+            value=value,
+            observed_at=datetime(2026, 8, 26, tzinfo=UTC),
+        ),
+    )
+
+
 class FakeKomariClient:
     """Controllable async client used without network access."""
 
@@ -157,16 +203,27 @@ class FakeKomariClient:
             )
         )
         self.metadata = (bootstrap.panel, bootstrap.capabilities)
+        self.metric_definitions: Mapping[str, KomariMetricDefinition] = (
+            parse_metric_definitions([])
+        )
+        self.metric_values: Mapping[KomariMetricSeriesKey, KomariMetricValue] = {}
         self.ping_tasks_error: Exception | None = None
         self.ping_stats_error: Exception | None = None
+        self.metric_definitions_error: Exception | None = None
+        self.metric_values_error: Exception | None = None
         self.metadata_error: Exception | None = None
         self.bootstrap_calls = 0
         self.nodes_calls = 0
         self.statuses_calls = 0
         self.ping_tasks_calls = 0
         self.ping_stats_calls = 0
+        self.metric_definitions_calls = 0
+        self.metric_values_calls = 0
         self.metadata_calls = 0
         self.last_ping_request: dict[str, object] | None = None
+        self.last_metric_requests: list[dict[str, object]] = []
+        self.last_metric_skipped_series_count = 0
+        self.last_metric_skipped_point_count = 0
 
     async def async_get_bootstrap(self) -> KomariBootstrapData:
         """Return or fail the bootstrap request."""
@@ -227,6 +284,60 @@ class FakeKomariClient:
         if self.ping_stats_error is not None:
             raise self.ping_stats_error
         return self.ping_stats
+
+    async def async_get_metric_definitions(
+        self,
+        capabilities: frozenset[str],
+    ) -> Mapping[str, KomariMetricDefinition]:
+        """Return or fail one server-declared Metric Definition list."""
+        assert {
+            METHOD_PUBLIC_METRIC_DEFINITIONS,
+            METHOD_PUBLIC_QUERY_METRICS,
+        }.issubset(capabilities)
+        self.metric_definitions_calls += 1
+        if self.metric_definitions_error is not None:
+            raise self.metric_definitions_error
+        return self.metric_definitions
+
+    async def async_query_metrics(
+        self,
+        capabilities: frozenset[str],
+        *,
+        metric_keys: tuple[str, ...],
+        entity_ids: tuple[str, ...],
+        tags: Mapping[str, str],
+        hours: int = 4,
+        max_points: int = 1,
+        aggregation: str = "last",
+        fill_empty: bool = False,
+    ) -> Mapping[KomariMetricSeriesKey, KomariMetricValue]:
+        """Return only the requested fake Metric series in one bounded call."""
+        assert {
+            METHOD_PUBLIC_METRIC_DEFINITIONS,
+            METHOD_PUBLIC_QUERY_METRICS,
+        }.issubset(capabilities)
+        self.metric_values_calls += 1
+        self.last_metric_requests.append(
+            {
+                "metric_keys": metric_keys,
+                "entity_ids": entity_ids,
+                "tags": dict(tags),
+                "hours": hours,
+                "max_points": max_points,
+                "aggregation": aggregation,
+                "fill_empty": fill_empty,
+            }
+        )
+        if self.metric_values_error is not None:
+            raise self.metric_values_error
+        requested_tags = frozenset(tags.items())
+        return {
+            key: value
+            for key, value in self.metric_values.items()
+            if key.metric_key in metric_keys
+            and key.entity_id in entity_ids
+            and requested_tags.issubset(key.tags)
+        }
 
     async def async_get_metadata(
         self,
@@ -958,3 +1069,284 @@ def test_same_node_uuid_is_isolated_between_entries(hass: HomeAssistant) -> None
     assert get_node_device(registry, entries[0].entry_id, "node-1") is None
     assert get_node_device(registry, entries[1].entry_id, "node-1") is not None
     assert remove_node_device(registry, entries[0].entry_id, "node-1") is False
+
+
+async def test_metric_bootstrap_groups_exact_filters_and_uses_locked_query_shape(
+    hass: HomeAssistant,
+) -> None:
+    """Metrics use at most one bounded request per exact selected tag filter."""
+    capabilities = frozenset(
+        {
+            METHOD_LATEST_STATUS,
+            METHOD_PUBLIC_NODES,
+            METHOD_PUBLIC_METRIC_DEFINITIONS,
+            METHOD_PUBLIC_QUERY_METRICS,
+        }
+    )
+    client = FakeKomariClient(_bootstrap(capabilities=capabilities))
+    client.metric_definitions = _metric_definitions("custom.rate", "custom.load")
+    client.metric_values = dict(
+        [
+            _metric_value("custom.rate", tags=(("region", "edge"),)),
+            _metric_value("custom.load"),
+            _metric_value("custom.rate", "hidden-node", tags=(("region", "edge"),)),
+        ]
+    )
+    coordinator = _coordinator(
+        hass,
+        client,
+        options={
+            CONF_METRIC_KEYS: ["custom.rate", "custom.load"],
+            CONF_METRIC_INTERVAL: 300,
+            CONF_METRIC_TAG_FILTERS: {"custom.rate": {"region": "edge"}},
+        },
+    )
+
+    snapshot = await coordinator._async_update_data()
+
+    assert set(snapshot.metric_definitions) == {"custom.rate", "custom.load"}
+    assert set(snapshot.metric_values) == {
+        KomariMetricSeriesKey("custom.rate", "node-1", (("region", "edge"),)),
+        KomariMetricSeriesKey("custom.load", "node-1", ()),
+    }
+    assert client.metric_definitions_calls == 1
+    assert client.last_metric_requests == [
+        {
+            "metric_keys": ("custom.rate",),
+            "entity_ids": ("node-1",),
+            "tags": {"region": "edge"},
+            "hours": 4,
+            "max_points": 1,
+            "aggregation": "last",
+            "fill_empty": False,
+        },
+        {
+            "metric_keys": ("custom.load",),
+            "entity_ids": ("node-1",),
+            "tags": {},
+            "hours": 4,
+            "max_points": 1,
+            "aggregation": "last",
+            "fill_empty": False,
+        },
+    ]
+    assert coordinator.metric_values_available is True
+
+
+async def test_metric_definition_misses_require_three_successes_before_removal(
+    hass: HomeAssistant,
+) -> None:
+    """A selected definition is retained through two authoritative omissions."""
+    capabilities = frozenset(
+        {
+            METHOD_LATEST_STATUS,
+            METHOD_PUBLIC_NODES,
+            METHOD_PUBLIC_METRIC_DEFINITIONS,
+            METHOD_PUBLIC_QUERY_METRICS,
+        }
+    )
+    client = FakeKomariClient(_bootstrap(capabilities=capabilities))
+    client.metric_definitions = _metric_definitions("custom.rate")
+    coordinator = _coordinator(
+        hass,
+        client,
+        options={CONF_METRIC_KEYS: ["custom.rate"]},
+    )
+    await coordinator._async_update_data()
+    client.metric_definitions = _metric_definitions()
+
+    for expected_misses in (1, 2):
+        coordinator._last_metric_definitions_attempt = -1_000_000
+        snapshot = await coordinator._async_update_data()
+        assert "custom.rate" in snapshot.metric_definitions
+        assert coordinator.metric_definition_missing_counts == {
+            "custom.rate": expected_misses
+        }
+
+    coordinator._last_metric_definitions_attempt = -1_000_000
+    removed = await coordinator._async_update_data()
+    assert "custom.rate" not in removed.metric_definitions
+    assert coordinator.confirmed_removed_metric_keys == {"custom.rate"}
+
+
+async def test_metric_value_failures_are_isolated_and_recover_after_two_polls(
+    hass: HomeAssistant,
+) -> None:
+    """Metric errors retain one prior value before only Metric entities expire."""
+    capabilities = frozenset(
+        {
+            METHOD_LATEST_STATUS,
+            METHOD_PUBLIC_NODES,
+            METHOD_PUBLIC_METRIC_DEFINITIONS,
+            METHOD_PUBLIC_QUERY_METRICS,
+        }
+    )
+    client = FakeKomariClient(_bootstrap(capabilities=capabilities))
+    client.metric_definitions = _metric_definitions("custom.rate")
+    metric_key, metric_value = _metric_value("custom.rate")
+    client.metric_values = {metric_key: metric_value}
+    coordinator = _coordinator(
+        hass,
+        client,
+        options={CONF_METRIC_KEYS: ["custom.rate"], CONF_METRIC_INTERVAL: 300},
+    )
+    initial = await coordinator._async_update_data()
+    client.metric_values_error = KomariConnectionError("metric transport detail")
+
+    for expected_available in (True, False):
+        coordinator._last_metric_values_attempt = -1_000_000
+        updated = await coordinator._async_update_data()
+        assert updated.metric_values == initial.metric_values
+        assert coordinator.metric_values_available is expected_available
+        assert updated.statuses == client.statuses
+
+    client.metric_values_error = None
+    coordinator._last_metric_values_attempt = -1_000_000
+    recovered = await coordinator._async_update_data()
+    assert recovered.metric_values == {metric_key: metric_value}
+    assert coordinator.metric_values_available is True
+
+
+@pytest.mark.parametrize(
+    ("branch", "method"),
+    [
+        (BRANCH_METRIC_DEFINITIONS, METHOD_PUBLIC_METRIC_DEFINITIONS),
+        (BRANCH_METRIC_VALUES, METHOD_PUBLIC_QUERY_METRICS),
+    ],
+)
+async def test_metric_method_not_found_downgrades_only_failed_capability(
+    hass: HomeAssistant,
+    branch: str,
+    method: str,
+) -> None:
+    """An advertised-but-missing Metric method never damages core updates."""
+    capabilities = frozenset(
+        {
+            METHOD_LATEST_STATUS,
+            METHOD_PUBLIC_NODES,
+            METHOD_PUBLIC_METRIC_DEFINITIONS,
+            METHOD_PUBLIC_QUERY_METRICS,
+        }
+    )
+    client = FakeKomariClient(_bootstrap(capabilities=capabilities))
+    client.metric_definitions = _metric_definitions("custom.rate")
+    if branch == BRANCH_METRIC_DEFINITIONS:
+        client.metric_definitions_error = KomariMethodNotFoundError(-32601, "gone")
+    else:
+        client.metric_values_error = KomariMethodNotFoundError(-32601, "gone")
+    coordinator = _coordinator(
+        hass,
+        client,
+        options={CONF_METRIC_KEYS: ["custom.rate"]},
+    )
+
+    snapshot = await coordinator._async_update_data()
+
+    assert method not in snapshot.capabilities
+    assert METHOD_LATEST_STATUS in snapshot.capabilities
+    assert coordinator.branch_states[branch].error_category == "method_not_found"
+
+
+async def test_metric_configuration_invalid_never_falls_back_to_empty_tags(
+    hass: HomeAssistant,
+) -> None:
+    """A malformed saved tag filter disables that metric's query safely."""
+    capabilities = frozenset(
+        {
+            METHOD_LATEST_STATUS,
+            METHOD_PUBLIC_NODES,
+            METHOD_PUBLIC_METRIC_DEFINITIONS,
+            METHOD_PUBLIC_QUERY_METRICS,
+        }
+    )
+    client = FakeKomariClient(_bootstrap(capabilities=capabilities))
+    client.metric_definitions = _metric_definitions("custom.rate")
+    coordinator = _coordinator(
+        hass,
+        client,
+        options={
+            CONF_METRIC_KEYS: ["custom.rate"],
+            CONF_METRIC_TAG_FILTERS: {"custom.rate": ["malformed"]},
+        },
+    )
+
+    snapshot = await coordinator._async_update_data()
+
+    assert snapshot.metric_values == {}
+    assert client.metric_values_calls == 0
+    assert coordinator.branch_states[BRANCH_METRIC_VALUES].error_category is None
+
+
+async def test_metric_optional_failure_variants_preserve_core_and_auth_semantics(
+    hass: HomeAssistant,
+) -> None:
+    """Each optional Metric failure has a bounded, branch-local recovery path."""
+    capabilities = frozenset(
+        {
+            METHOD_LATEST_STATUS,
+            METHOD_PUBLIC_NODES,
+            METHOD_PUBLIC_METRIC_DEFINITIONS,
+            METHOD_PUBLIC_QUERY_METRICS,
+        }
+    )
+    client = FakeKomariClient(_bootstrap(capabilities=capabilities))
+    definitions = _metric_definitions("custom.rate")
+    metric_key, metric_value = _metric_value("custom.rate")
+    client.metric_definitions = definitions
+    client.metric_values = {metric_key: metric_value}
+    coordinator = _coordinator(
+        hass,
+        client,
+        options={CONF_METRIC_KEYS: ["custom.rate"]},
+    )
+    await coordinator._async_update_data()
+
+    client.metric_definitions_error = KomariConnectionError("sanitized definition")
+    (
+        retained_definitions,
+        retained_capabilities,
+    ) = await coordinator._async_refresh_metric_definitions(definitions, capabilities)
+    assert retained_definitions == definitions
+    assert retained_capabilities == capabilities
+    assert (
+        coordinator.branch_states[BRANCH_METRIC_DEFINITIONS].error_category
+        == "connection"
+    )
+
+    client.metric_definitions_error = KomariMethodNotFoundError(-32601, "gone")
+    _, downgraded_capabilities = await coordinator._async_refresh_metric_definitions(
+        definitions,
+        capabilities,
+    )
+    assert METHOD_PUBLIC_METRIC_DEFINITIONS not in downgraded_capabilities
+
+    (
+        retained_values,
+        unsupported_capabilities,
+    ) = await coordinator._async_refresh_metric_values(
+        {metric_key: metric_value},
+        frozenset({METHOD_LATEST_STATUS}),
+        client.nodes,
+        definitions,
+    )
+    assert retained_values == {metric_key: metric_value}
+    assert unsupported_capabilities == {METHOD_LATEST_STATUS}
+
+    client.metric_definitions_error = None
+    client.metric_values_error = KomariMethodNotFoundError(-32601, "gone")
+    _, downgraded_capabilities = await coordinator._async_refresh_metric_values(
+        {metric_key: metric_value},
+        capabilities,
+        client.nodes,
+        definitions,
+    )
+    assert METHOD_PUBLIC_QUERY_METRICS not in downgraded_capabilities
+
+    client.metric_values_error = KomariAuthenticationError("credential failure")
+    with pytest.raises(ConfigEntryAuthFailed):
+        await coordinator._async_refresh_metric_values(
+            {metric_key: metric_value},
+            capabilities,
+            client.nodes,
+            definitions,
+        )

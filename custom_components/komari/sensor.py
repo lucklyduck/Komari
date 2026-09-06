@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass
+from hashlib import sha256
+from math import isfinite
 from typing import TYPE_CHECKING, cast, override
+from urllib.parse import quote
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -23,10 +28,23 @@ from homeassistant.core import callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, MAX_PING_ENTITIES
+from .const import (
+    DOMAIN,
+    MAX_METRIC_ENTITIES,
+    MAX_PING_ENTITIES,
+    SUPPORTED_DYNAMIC_METRIC_TYPES,
+)
 from .entity import KomariNodeEntity, KomariPanelEntity
-from .models import KomariPingSeriesKey, KomariPingStats, TrafficLimitType
+from .lifecycle import metric_identity_from_unique_id
+from .models import (
+    KomariMetricDefinition,
+    KomariMetricSeriesKey,
+    KomariPingSeriesKey,
+    KomariPingStats,
+    TrafficLimitType,
+)
 from .options import get_options
+from .repairs import update_metric_entity_limit_repair
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -101,9 +119,17 @@ def _has_temperature(node: KomariNode, status: KomariNodeStatus | None) -> bool:
     return status is not None and _valid_temperature(status.temperature) is not None
 
 
+_TEMPERATURE_MIN_EXCLUSIVE_C = 0.0
+_TEMPERATURE_MAX_INCLUSIVE_C = 200.0
+
+
 def _valid_temperature(value: float | None) -> float | None:
     """Return a physically plausible Celsius value reported by Komari."""
-    if value is None or value <= 0 or value > 200:
+    if (
+        value is None
+        or not isfinite(value)
+        or not _TEMPERATURE_MIN_EXCLUSIVE_C < value <= _TEMPERATURE_MAX_INCLUSIVE_C
+    ):
         return None
     return value
 
@@ -792,6 +818,164 @@ class KomariNodePingSensor(KomariNodeEntity, SensorEntity):
         super()._handle_coordinator_update()
 
 
+def _metric_tags_digest(tags: tuple[tuple[str, str], ...]) -> str:
+    """Return a full stable digest for a canonical Metric tag identity."""
+    payload = json.dumps(
+        sorted(tags),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return sha256(payload).hexdigest()
+
+
+def metric_unique_id(
+    entry_id: str,
+    series_key: KomariMetricSeriesKey,
+) -> str:
+    """Return the entry/node/Metric identity without embedding raw tags."""
+    metric_key = quote(series_key.metric_key, safe="")
+    return (
+        f"{entry_id}:node:{series_key.entity_id}:metric:{metric_key}:"
+        f"{_metric_tags_digest(series_key.tags)}"
+    )
+
+
+def _metric_description(
+    definition: KomariMetricDefinition,
+    language: str,
+) -> str:
+    """Select a server description by Home Assistant's locale fallback order."""
+    description = definition.description
+    if isinstance(description, str) and description.strip():
+        return description.strip()
+    if isinstance(description, Mapping):
+        candidates = (language, language.split("-", 1)[0], "en")
+        for candidate in candidates:
+            value = description.get(candidate)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        for _, value in sorted(description.items()):
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return definition.metric_key
+
+
+def _metric_name(
+    definition: KomariMetricDefinition,
+    language: str,
+    tags: tuple[tuple[str, str], ...],
+) -> str:
+    """Return a deterministic display name while keeping tags out of state data."""
+    name = _metric_description(definition, language)
+    if not tags:
+        return name
+    suffix = ", ".join(f"{key}={value}" for key, value in sorted(tags))
+    if len(suffix) > 80:
+        suffix = f"{suffix[:77]}..."
+    return f"{name} ({suffix})"
+
+
+def _metric_sensor_metadata(
+    definition: KomariMetricDefinition,
+) -> tuple[
+    SensorDeviceClass | None,
+    str | None,
+    SensorStateClass | None,
+]:
+    """Map the documented Metric type and unit to HA sensor semantics."""
+    state_class = {
+        "gauge": SensorStateClass.MEASUREMENT,
+        "counter": SensorStateClass.TOTAL_INCREASING,
+    }.get(definition.metric_type)
+    unit = definition.unit.strip() if definition.unit is not None else ""
+    normalized_unit = unit.casefold()
+    if normalized_unit in {"%", "percent"}:
+        return None, PERCENTAGE, state_class
+    if normalized_unit == "bytes":
+        return SensorDeviceClass.DATA_SIZE, UnitOfInformation.BYTES, state_class
+    if normalized_unit == "bytes/s":
+        return (
+            SensorDeviceClass.DATA_RATE,
+            UnitOfDataRate.BYTES_PER_SECOND,
+            state_class,
+        )
+    if normalized_unit == "ms":
+        return SensorDeviceClass.DURATION, UnitOfTime.MILLISECONDS, state_class
+    if normalized_unit in {"°c", "celsius"}:
+        return (
+            SensorDeviceClass.TEMPERATURE,
+            UnitOfTemperature.CELSIUS,
+            state_class,
+        )
+    return None, None, state_class
+
+
+class KomariNodeMetricSensor(KomariNodeEntity, SensorEntity):
+    """One selected node-scoped dynamic Metric series."""
+
+    _attr_entity_registry_enabled_default = True
+
+    def __init__(
+        self,
+        entry: KomariConfigEntry,
+        series_key: KomariMetricSeriesKey,
+        definition: KomariMetricDefinition,
+    ) -> None:
+        """Initialize an identity that is stable across tag order changes."""
+        super().__init__(
+            entry,
+            series_key.entity_id,
+            SensorEntityDescription(key="metric"),
+        )
+        self._series_key = series_key
+        self._definition = definition
+        self._attr_unique_id = metric_unique_id(entry.entry_id, series_key)
+        self._apply_definition()
+
+    def _apply_definition(self) -> None:
+        """Refresh presentation metadata without changing the unique identity."""
+        device_class, unit, state_class = _metric_sensor_metadata(self._definition)
+        self._attr_name = _metric_name(
+            self._definition,
+            self.coordinator.hass.config.language,
+            self._series_key.tags,
+        )
+        self._attr_device_class = device_class
+        self._attr_native_unit_of_measurement = unit
+        self._attr_state_class = state_class
+
+    @property
+    @override
+    def native_value(self) -> float | None:
+        """Return the current finite value without retaining raw history."""
+        if value := self.coordinator.data.metric_values.get(self._series_key):
+            return value.value
+        return None
+
+    @property
+    @override
+    def available(self) -> bool:
+        """Require core success, an online node, and a non-stale Metric value."""
+        return (
+            super().available
+            and (status := self.status) is not None
+            and status.online
+            and self.coordinator.metric_values_available
+            and self.native_value is not None
+        )
+
+    @callback
+    @override
+    def _handle_coordinator_update(self) -> None:
+        """Refresh a changed Definition description without changing identity."""
+        if definition := self.coordinator.data.metric_definitions.get(
+            self._series_key.metric_key
+        ):
+            self._definition = definition
+            self._apply_definition()
+        super()._handle_coordinator_update()
+
+
 def _remove_node_sensor_keys(
     registry: er.EntityRegistry,
     entry_id: str,
@@ -843,9 +1027,29 @@ async def async_setup_entry(
 
     known_entity_keys: set[tuple[str, str]] = set()
     known_ping_entity_keys: set[tuple[str, str, str]] = set()
+    known_metric_entity_keys: set[KomariMetricSeriesKey] = set()
 
     @callback
     def _async_add_new_node_entities() -> None:
+        node_ids = frozenset(coordinator.data.nodes)
+        known_entity_keys.intersection_update(
+            (node_uuid, key)
+            for node_uuid, key in known_entity_keys
+            if node_uuid in node_ids
+        )
+        ping_task_ids = frozenset(coordinator.data.ping_tasks)
+        known_ping_entity_keys.intersection_update(
+            (node_uuid, task_id, key)
+            for node_uuid, task_id, key in known_ping_entity_keys
+            if node_uuid in node_ids and task_id in ping_task_ids
+        )
+        confirmed_removed_metrics = frozenset(coordinator.confirmed_removed_metric_keys)
+        known_metric_entity_keys.intersection_update(
+            series_key
+            for series_key in known_metric_entity_keys
+            if series_key.entity_id in node_ids
+            and series_key.metric_key not in confirmed_removed_metrics
+        )
         entities: list[SensorEntity] = []
         for node_uuid, node in coordinator.data.nodes.items():
             status = coordinator.data.statuses.get(node_uuid)
@@ -919,6 +1123,72 @@ async def async_setup_entry(
                         description,
                     )
                 )
+
+        selected_metrics = frozenset(options.metric_keys)
+        definitions = coordinator.data.metric_definitions
+        metric_candidates = sorted(
+            (
+                series_key
+                for series_key, value in coordinator.data.metric_values.items()
+                if series_key.entity_id in node_ids
+                and series_key.metric_key in selected_metrics
+                and (definition := definitions.get(series_key.metric_key)) is not None
+                and definition.metric_type in SUPPORTED_DYNAMIC_METRIC_TYPES
+                and definition.retention_days > 0
+                and value.value is not None
+            ),
+            key=lambda series_key: (
+                series_key.metric_key,
+                series_key.entity_id,
+                series_key.tags,
+            ),
+        )
+        update_metric_entity_limit_repair(
+            hass,
+            entry,
+            entity_count=len(metric_candidates),
+        )
+
+        registered_metric_unique_ids = {
+            registry_entry.unique_id
+            for registry_entry in er.async_entries_for_config_entry(
+                registry,
+                entry.entry_id,
+            )
+            if registry_entry.domain == "sensor"
+            and metric_identity_from_unique_id(
+                entry.entry_id,
+                registry_entry.unique_id,
+            )
+            is not None
+        }
+        new_metric_slots = max(
+            0,
+            MAX_METRIC_ENTITIES - len(registered_metric_unique_ids),
+        )
+        metric_candidates.sort(
+            key=lambda series_key: (
+                metric_unique_id(entry.entry_id, series_key)
+                not in registered_metric_unique_ids
+                and series_key not in known_metric_entity_keys,
+                series_key.metric_key,
+                series_key.entity_id,
+                series_key.tags,
+            )
+        )
+        for series_key in metric_candidates:
+            if series_key in known_metric_entity_keys:
+                continue
+            unique_id = metric_unique_id(entry.entry_id, series_key)
+            if unique_id not in registered_metric_unique_ids:
+                if new_metric_slots == 0:
+                    continue
+                new_metric_slots -= 1
+            definition = definitions.get(series_key.metric_key)
+            if definition is None:
+                continue
+            known_metric_entity_keys.add(series_key)
+            entities.append(KomariNodeMetricSensor(entry, series_key, definition))
         if entities:
             async_add_entities(entities)
 

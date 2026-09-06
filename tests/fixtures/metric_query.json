@@ -1,0 +1,43 @@
+{
+  "series": [
+    {
+      "metric_key": "custom.rate",
+      "entity_id": "00000000-0000-0000-0000-000000000001",
+      "tags": {
+        "region": "fixture",
+        "scope": "node"
+      },
+      "labels": {
+        "display_name": "ignored by identity"
+      },
+      "points": [
+        {
+          "time": "2026-08-26T00:00:00Z",
+          "value": 12.5
+        }
+      ]
+    },
+    {
+      "metric_key": "custom.counter",
+      "entity_id": "00000000-0000-0000-0000-000000000001",
+      "tags": {},
+      "points": [
+        {
+          "time": "2026-08-26T00:00:00Z",
+          "value": 42
+        }
+      ]
+    },
+    {
+      "metric_key": "custom.empty",
+      "entity_id": "00000000-0000-0000-0000-000000000001",
+      "tags": {},
+      "points": [
+        {
+          "time": "2026-08-26T00:00:00Z",
+          "value": null
+        }
+      ]
+    }
+  ]
+}

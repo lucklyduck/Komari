@@ -17,11 +17,20 @@ from .const import (
     AUTHORITATIVE_MISSING_THRESHOLD,
     CAPABILITY_REFRESH_INTERVAL,
     DOMAIN,
+    DYNAMIC_METRIC_METHODS,
     INVENTORY_REFRESH_INTERVAL,
+    METHOD_PUBLIC_METRIC_DEFINITIONS,
     METHOD_PUBLIC_PING_TASKS,
+    METHOD_PUBLIC_QUERY_METRICS,
+    METRIC_DEFINITION_REFRESH_INTERVAL,
+    METRIC_QUERY_AGGREGATION,
+    METRIC_QUERY_FILL_EMPTY,
+    METRIC_QUERY_HOURS,
+    METRIC_QUERY_MAX_POINTS,
     PING_QUERY_HOURS,
     PING_QUERY_MAX_POINTS,
     PING_TASK_REFRESH_INTERVAL,
+    SUPPORTED_DYNAMIC_METRIC_TYPES,
 )
 from .exceptions import (
     KomariAuthenticationError,
@@ -44,6 +53,9 @@ if TYPE_CHECKING:
     from .data import KomariConfigEntry
     from .models import (
         KomariBootstrapData,
+        KomariMetricDefinition,
+        KomariMetricSeriesKey,
+        KomariMetricValue,
         KomariNode,
         KomariNodeStatus,
         KomariPanelInfo,
@@ -58,12 +70,16 @@ BRANCH_CORE = "core"
 BRANCH_INVENTORY = "inventory"
 BRANCH_PING_TASKS = "ping_tasks"
 BRANCH_PING_STATS = "ping_stats"
+BRANCH_METRIC_DEFINITIONS = "metric_definitions"
+BRANCH_METRIC_VALUES = "metric_values"
 BRANCH_CAPABILITIES = "capabilities"
 BRANCHES = (
     BRANCH_CORE,
     BRANCH_INVENTORY,
     BRANCH_PING_TASKS,
     BRANCH_PING_STATS,
+    BRANCH_METRIC_DEFINITIONS,
+    BRANCH_METRIC_VALUES,
     BRANCH_CAPABILITIES,
 )
 
@@ -75,6 +91,16 @@ def _empty_ping_tasks() -> Mapping[str, KomariPingTask]:
 
 def _empty_ping_stats() -> Mapping[KomariPingSeriesKey, KomariPingStats]:
     """Return an immutable empty Ping-statistics mapping."""
+    return MappingProxyType({})
+
+
+def _empty_metric_definitions() -> Mapping[str, KomariMetricDefinition]:
+    """Return an immutable empty Metric Definition mapping."""
+    return MappingProxyType({})
+
+
+def _empty_metric_values() -> Mapping[KomariMetricSeriesKey, KomariMetricValue]:
+    """Return an immutable empty Metric-value mapping."""
     return MappingProxyType({})
 
 
@@ -103,6 +129,12 @@ class KomariSnapshot:
     ping_tasks: Mapping[str, KomariPingTask] = field(default_factory=_empty_ping_tasks)
     ping_stats: Mapping[KomariPingSeriesKey, KomariPingStats] = field(
         default_factory=_empty_ping_stats
+    )
+    metric_definitions: Mapping[str, KomariMetricDefinition] = field(
+        default_factory=_empty_metric_definitions
+    )
+    metric_values: Mapping[KomariMetricSeriesKey, KomariMetricValue] = field(
+        default_factory=_empty_metric_values
     )
     branch_states: Mapping[str, KomariBranchState] = field(
         default_factory=_empty_branch_states
@@ -155,17 +187,24 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
         self._last_inventory_attempt: float | None = None
         self._last_ping_tasks_attempt: float | None = None
         self._last_ping_stats_attempt: float | None = None
+        self._last_metric_definitions_attempt: float | None = None
+        self._last_metric_values_attempt: float | None = None
         self._last_capabilities_attempt: float | None = None
         self._branch_states: dict[str, KomariBranchState] = {
             branch: KomariBranchState() for branch in BRANCHES
         }
         self._node_missing_counts: dict[str, int] = {}
         self._ping_task_missing_counts: dict[str, int] = {}
+        self._metric_definition_missing_counts: dict[str, int] = {}
         self._tracked_node_ids: set[str] = set()
         self._tracked_ping_task_ids: set[str] = set(self.options.ping_task_ids)
+        self._tracked_metric_keys: set[str] = set(self.options.metric_keys)
         self._last_observed_node_ids: frozenset[str] = frozenset()
         self._confirmed_removed_node_ids: set[str] = set()
         self._confirmed_removed_ping_task_ids: set[str] = set()
+        self._confirmed_removed_metric_keys: set[str] = set()
+        self._metric_skipped_series_count = 0
+        self._metric_skipped_point_count = 0
 
     @property
     def branch_states(self) -> Mapping[str, KomariBranchState]:
@@ -179,6 +218,12 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
         return state.fetched_at is not None and state.consecutive_failures < 2
 
     @property
+    def metric_values_available(self) -> bool:
+        """Return whether Metric data remains inside its two-failure TTL."""
+        state = self._branch_states[BRANCH_METRIC_VALUES]
+        return state.fetched_at is not None and state.consecutive_failures < 2
+
+    @property
     def node_missing_counts(self) -> Mapping[str, int]:
         """Return current authoritative node-absence counters."""
         return MappingProxyType(dict(self._node_missing_counts))
@@ -187,6 +232,11 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
     def ping_task_missing_counts(self) -> Mapping[str, int]:
         """Return current authoritative Ping-task absence counters."""
         return MappingProxyType(dict(self._ping_task_missing_counts))
+
+    @property
+    def metric_definition_missing_counts(self) -> Mapping[str, int]:
+        """Return authoritative Metric Definition absence counters."""
+        return MappingProxyType(dict(self._metric_definition_missing_counts))
 
     @property
     def last_observed_node_ids(self) -> frozenset[str]:
@@ -202,6 +252,21 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
     def confirmed_removed_ping_task_ids(self) -> frozenset[str]:
         """Return Ping tasks confirmed absent during this coordinator lifetime."""
         return frozenset(self._confirmed_removed_ping_task_ids)
+
+    @property
+    def confirmed_removed_metric_keys(self) -> frozenset[str]:
+        """Return Metric Definitions confirmed absent during coordinator life."""
+        return frozenset(self._confirmed_removed_metric_keys)
+
+    @property
+    def metric_skipped_series_count(self) -> int:
+        """Return only the latest sanitized Metric-series skip count."""
+        return self._metric_skipped_series_count
+
+    @property
+    def metric_skipped_point_count(self) -> int:
+        """Return only the latest sanitized Metric-point skip count."""
+        return self._metric_skipped_point_count
 
     def track_registry_node_ids(self, node_ids: Iterable[str]) -> None:
         """Include pre-existing registry nodes in future absence confirmation."""
@@ -223,6 +288,8 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
         capabilities = self._snapshot.capabilities
         ping_tasks = self._snapshot.ping_tasks
         ping_stats = self._snapshot.ping_stats
+        metric_definitions = self._snapshot.metric_definitions
+        metric_values = self._snapshot.metric_values
         now = monotonic()
 
         if self._inventory_is_due(now):
@@ -261,6 +328,25 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
                 nodes,
             )
 
+        if self._metric_definitions_are_due(now):
+            self._last_metric_definitions_attempt = now
+            (
+                metric_definitions,
+                capabilities,
+            ) = await self._async_refresh_metric_definitions(
+                metric_definitions,
+                capabilities,
+            )
+
+        if self.options.metric_keys and self._metric_values_are_due(now):
+            self._last_metric_values_attempt = now
+            metric_values, capabilities = await self._async_refresh_metric_values(
+                metric_values,
+                capabilities,
+                nodes,
+                metric_definitions,
+            )
+
         if self._capabilities_are_due(now):
             self._last_capabilities_attempt = now
             try:
@@ -280,6 +366,8 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
             capabilities=capabilities,
             ping_tasks=ping_tasks,
             ping_stats=ping_stats,
+            metric_definitions=metric_definitions,
+            metric_values=metric_values,
         )
 
     async def _async_bootstrap(self) -> KomariSnapshot:
@@ -309,6 +397,8 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
         self._snapshot = snapshot
         ping_tasks = snapshot.ping_tasks
         ping_stats = snapshot.ping_stats
+        metric_definitions = snapshot.metric_definitions
+        metric_values = snapshot.metric_values
         capabilities = snapshot.capabilities
 
         if METHOD_PUBLIC_PING_TASKS in capabilities:
@@ -325,6 +415,24 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
                 snapshot.nodes,
             )
 
+        if DYNAMIC_METRIC_METHODS.issubset(capabilities):
+            self._last_metric_definitions_attempt = now
+            (
+                metric_definitions,
+                capabilities,
+            ) = await self._async_refresh_metric_definitions(
+                metric_definitions,
+                capabilities,
+            )
+        if self.options.metric_keys:
+            self._last_metric_values_attempt = now
+            metric_values, capabilities = await self._async_refresh_metric_values(
+                metric_values,
+                capabilities,
+                snapshot.nodes,
+                metric_definitions,
+            )
+
         return self._publish_snapshot(
             panel=snapshot.panel,
             nodes=snapshot.nodes,
@@ -332,6 +440,8 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
             capabilities=capabilities,
             ping_tasks=ping_tasks,
             ping_stats=ping_stats,
+            metric_definitions=metric_definitions,
+            metric_values=metric_values,
         )
 
     async def _async_refresh_core(self) -> Mapping[str, KomariNodeStatus]:
@@ -428,6 +538,148 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
         self._record_success(BRANCH_PING_STATS)
         return filtered_stats, capabilities
 
+    async def _async_refresh_metric_definitions(
+        self,
+        prior: Mapping[str, KomariMetricDefinition],
+        capabilities: frozenset[str],
+    ) -> tuple[Mapping[str, KomariMetricDefinition], frozenset[str]]:
+        """Refresh optional Metric Definitions with authoritative missing grace."""
+        if not DYNAMIC_METRIC_METHODS.issubset(capabilities):
+            return prior, capabilities
+        try:
+            definitions = await self.client.async_get_metric_definitions(capabilities)
+        except (KomariAuthenticationError, KomariPermissionError) as err:
+            self._record_failure(BRANCH_METRIC_DEFINITIONS, err)
+            self._raise_auth_failed(err)
+        except KomariMethodNotFoundError as err:
+            self._record_failure(BRANCH_METRIC_DEFINITIONS, err)
+            return prior, capabilities - {METHOD_PUBLIC_METRIC_DEFINITIONS}
+        except KomariError as err:
+            self._record_failure(BRANCH_METRIC_DEFINITIONS, err)
+            return prior, capabilities
+
+        retained_definitions, removed_metric_keys = _retain_until_confirmed_missing(
+            prior,
+            definitions,
+            self._metric_definition_missing_counts,
+            self._tracked_metric_keys,
+        )
+        self._confirmed_removed_metric_keys.difference_update(definitions)
+        self._confirmed_removed_metric_keys.update(removed_metric_keys)
+        self._record_success(BRANCH_METRIC_DEFINITIONS)
+        return retained_definitions, capabilities
+
+    async def _async_refresh_metric_values(
+        self,
+        prior: Mapping[KomariMetricSeriesKey, KomariMetricValue],
+        capabilities: frozenset[str],
+        nodes: Mapping[str, KomariNode],
+        definitions: Mapping[str, KomariMetricDefinition],
+    ) -> tuple[
+        Mapping[KomariMetricSeriesKey, KomariMetricValue],
+        frozenset[str],
+    ]:
+        """Query selected Metric groups while isolating all optional failures."""
+        active_groups = self._metric_query_groups(definitions)
+        active_metric_keys = frozenset(
+            metric_key
+            for metric_keys in active_groups.values()
+            for metric_key in metric_keys
+        )
+        retained_prior = MappingProxyType(
+            {
+                key: value
+                for key, value in prior.items()
+                if key.metric_key in active_metric_keys and key.entity_id in nodes
+            }
+        )
+        if not active_groups or not nodes:
+            self._metric_skipped_series_count = 0
+            self._metric_skipped_point_count = 0
+            self._record_success(BRANCH_METRIC_VALUES)
+            return MappingProxyType({}), capabilities
+        if not DYNAMIC_METRIC_METHODS.issubset(capabilities):
+            self._record_failure(
+                BRANCH_METRIC_VALUES,
+                KomariUnsupportedError("Metric capability is unavailable"),
+            )
+            return retained_prior, capabilities
+
+        values: dict[KomariMetricSeriesKey, KomariMetricValue] = {}
+        skipped_series_count = 0
+        skipped_point_count = 0
+        try:
+            for canonical_tags, metric_keys in active_groups.items():
+                queried_values = await self.client.async_query_metrics(
+                    capabilities,
+                    metric_keys=metric_keys,
+                    entity_ids=tuple(nodes),
+                    tags=dict(canonical_tags),
+                    hours=METRIC_QUERY_HOURS,
+                    max_points=METRIC_QUERY_MAX_POINTS,
+                    aggregation=METRIC_QUERY_AGGREGATION,
+                    fill_empty=METRIC_QUERY_FILL_EMPTY,
+                )
+                values.update(queried_values)
+                skipped_series_count += getattr(
+                    self.client,
+                    "last_metric_skipped_series_count",
+                    0,
+                )
+                skipped_point_count += getattr(
+                    self.client,
+                    "last_metric_skipped_point_count",
+                    0,
+                )
+        except (KomariAuthenticationError, KomariPermissionError) as err:
+            self._record_failure(BRANCH_METRIC_VALUES, err)
+            self._raise_auth_failed(err)
+        except KomariMethodNotFoundError as err:
+            self._record_failure(BRANCH_METRIC_VALUES, err)
+            return retained_prior, capabilities - {METHOD_PUBLIC_QUERY_METRICS}
+        except KomariError as err:
+            self._record_failure(BRANCH_METRIC_VALUES, err)
+            return retained_prior, capabilities
+
+        visible_nodes = frozenset(nodes)
+        filtered_values = MappingProxyType(
+            {
+                key: value
+                for key, value in values.items()
+                if key.metric_key in active_metric_keys
+                and key.entity_id in visible_nodes
+            }
+        )
+        self._metric_skipped_series_count = (
+            skipped_series_count + len(values) - len(filtered_values)
+        )
+        self._metric_skipped_point_count = skipped_point_count
+        self._record_success(BRANCH_METRIC_VALUES)
+        return filtered_values, capabilities
+
+    def _metric_query_groups(
+        self,
+        definitions: Mapping[str, KomariMetricDefinition],
+    ) -> Mapping[tuple[tuple[str, str], ...], tuple[str, ...]]:
+        """Group valid selected Metrics by their exact canonical tag filters."""
+        groups: dict[tuple[tuple[str, str], ...], list[str]] = {}
+        for metric_key in self.options.metric_keys:
+            if metric_key in self.options.invalid_metric_filter_keys:
+                continue
+            definition = definitions.get(metric_key)
+            if (
+                definition is None
+                or definition.metric_type not in SUPPORTED_DYNAMIC_METRIC_TYPES
+                or definition.retention_days <= 0
+            ):
+                continue
+            tags = self.options.metric_tag_filters.get(metric_key, {})
+            canonical_tags = tuple(sorted(tags.items()))
+            groups.setdefault(canonical_tags, []).append(metric_key)
+        return MappingProxyType(
+            {tags: tuple(metric_keys) for tags, metric_keys in groups.items()}
+        )
+
     def _publish_snapshot(
         self,
         *,
@@ -437,6 +689,8 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
         capabilities: frozenset[str],
         ping_tasks: Mapping[str, KomariPingTask],
         ping_stats: Mapping[KomariPingSeriesKey, KomariPingStats],
+        metric_definitions: Mapping[str, KomariMetricDefinition],
+        metric_values: Mapping[KomariMetricSeriesKey, KomariMetricValue],
     ) -> KomariSnapshot:
         """Publish one frozen branch-consistent view."""
         self._snapshot = KomariSnapshot(
@@ -446,6 +700,8 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
             capabilities=capabilities,
             ping_tasks=ping_tasks,
             ping_stats=ping_stats,
+            metric_definitions=metric_definitions,
+            metric_values=metric_values,
             branch_states=self.branch_states,
         )
         return self._snapshot
@@ -524,6 +780,22 @@ class KomariDataUpdateCoordinator(DataUpdateCoordinator[KomariSnapshot]):
             self._last_ping_stats_attempt,
             now,
             timedelta(seconds=self.options.ping_interval),
+        )
+
+    def _metric_definitions_are_due(self, now: float) -> bool:
+        """Return whether Metric Definition discovery is due."""
+        return _is_due(
+            self._last_metric_definitions_attempt,
+            now,
+            METRIC_DEFINITION_REFRESH_INTERVAL,
+        )
+
+    def _metric_values_are_due(self, now: float) -> bool:
+        """Return whether selected Metric values are due."""
+        return _is_due(
+            self._last_metric_values_attempt,
+            now,
+            timedelta(seconds=self.options.metric_interval),
         )
 
     def _capabilities_are_due(self, now: float) -> bool:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from urllib.parse import unquote
 
 from homeassistant.helpers import entity_registry as er
 
@@ -74,6 +75,36 @@ def registry_ping_task_ids(
     )
 
 
+def metric_identity_from_unique_id(
+    entry_id: str,
+    unique_id: str,
+) -> tuple[str, str] | None:
+    """Parse a node and metric key from one entry-scoped Metric unique ID.
+
+    Dynamic Metric identities deliberately keep the tag digest opaque here.  The
+    registry lifecycle only needs the metric key to remove a user-deselected or
+    authoritatively removed definition; tags remain part of the entity identity
+    and are never surfaced by this helper.
+    """
+    prefix = f"{entry_id}:node:"
+    if not unique_id.startswith(prefix):
+        return None
+    node_uuid, separator, metric_and_digest = unique_id.removeprefix(prefix).partition(
+        ":metric:"
+    )
+    metric_key, digest_separator, digest = metric_and_digest.rpartition(":")
+    if (
+        not separator
+        or not digest_separator
+        or not node_uuid
+        or not metric_key
+        or not digest
+    ):
+        return None
+    decoded_metric_key = unquote(metric_key)
+    return (node_uuid, decoded_metric_key) if decoded_metric_key else None
+
+
 def remove_node_registry_entries(
     device_registry: dr.DeviceRegistry,
     entity_registry: er.EntityRegistry,
@@ -113,6 +144,34 @@ def remove_disallowed_ping_entities(
             and task_id not in removed_tasks
             and stat_key in allowed_stats
         ):
+            continue
+        registry.async_remove(item.entity_id)
+        removed += 1
+    return removed
+
+
+def remove_disallowed_metric_entities(
+    registry: er.EntityRegistry,
+    entry_id: str,
+    *,
+    allowed_metric_keys: Collection[str],
+    confirmed_removed_metric_keys: Collection[str] = (),
+) -> int:
+    """Remove deselected or authoritatively deleted Metric entities.
+
+    A temporarily absent Series must not be removed: this helper makes a
+    decision from persisted selection or the coordinator's three-successful-
+    definition-misses signal only.
+    """
+    allowed_metrics = frozenset(allowed_metric_keys)
+    removed_metrics = frozenset(confirmed_removed_metric_keys)
+    removed = 0
+    for item in tuple(er.async_entries_for_config_entry(registry, entry_id)):
+        identity = metric_identity_from_unique_id(entry_id, item.unique_id)
+        if identity is None:
+            continue
+        _, metric_key = identity
+        if metric_key in allowed_metrics and metric_key not in removed_metrics:
             continue
         registry.async_remove(item.entity_id)
         removed += 1
