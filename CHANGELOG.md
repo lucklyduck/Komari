@@ -6,6 +6,33 @@ The project follows Semantic Versioning while it remains a custom integration. V
 before `1.0.0` may still introduce breaking changes, which will be called out explicitly in
 the release notes.
 
+## [Unreleased]
+
+### Added
+
+- F16 dynamic Metric discovery, bounded four-hour `last` queries, localized names, exact
+  tag filters, node-scoped entities, repairs and redacted diagnostics.
+- Local fake-panel fixtures and smoke controls for empty, malformed, high-cardinality,
+  method-missing, branch-failure and authentication Metric responses.
+- A compatibility evidence record that separates automated checks from pending real-panel
+  and HACS lifecycle validation.
+
+### Fixed
+
+- Reauthentication tests now await only the affected Entry reload and leave no reload task.
+- Confirmed-removed nodes and Ping tasks can recreate their original entity identities when
+  the same remote ID returns.
+- Temporary Ping capability or inventory loss no longer clears saved task/statistic choices.
+- The legacy temperature value `0` is consistently treated as Komari's absent-temperature
+  sentinel; only finite values in `(0, 200]` create temperature entities.
+
+### Upgrade notes
+
+- Dynamic Metrics are opt-in and disabled by default. Do not downgrade an Entry with saved
+  dynamic-Metric choices to `0.2.0-alpha.1` without first backing up and clearing them.
+- `v0.3.0` has not been released yet. Real compatibility and HACS lifecycle evidence remains
+  a release requirement; the 24-hour soak is explicitly outside this release gate.
+
 ## [0.2.0-alpha.1] - 2026-08-30
 
 ### Added

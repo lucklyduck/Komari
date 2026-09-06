@@ -870,7 +870,9 @@ CoordinatorEntity[KomariDataUpdateCoordinator]
 - 使用 Home Assistant 原生单位常量，容量模型统一为 bytes。
 - 百分比计算放在纯函数中：分母 `None` 或 `<= 0` 返回 `None`；结果允许短时略超 100，但对明显异常值不静默截断，应标记无效或保留诊断。
 - GPU/Swap/温度实体只在节点具备有效数据时创建；后续数据暂时缺失时保留实体并 unavailable。
-- 温度范围阈值写成常量并基于 Komari 实际语义验证，不把合法的 0°C 一概当成空值。
+- 温度范围阈值写成常量。当前 legacy `common:getNodesLatestStatus` 以 `0` 表示未提供
+  温度，因此只有 `0 < value <= 200°C` 有效；未来只有新 RPC 明确提供 presence 语义后，
+  才能单独支持真实 `0°C`。
 - 核心最新状态只有节点汇总值时，不创建“每块磁盘”“每张网卡”或“每个 GPU”实体。
 
 ### 测试
@@ -1101,21 +1103,22 @@ unique ID 格式：
 ```python
 @dataclass(frozen=True, slots=True)
 class KomariMetricDefinition:
-    key: str
-    name: str
-    value_type: str | None
+    metric_key: str
     unit: str | None
-    description: str | None
-    allowed_labels: tuple[str, ...]
+    description: str | Mapping[str, str] | None
+    metric_type: str
+    retention_days: int
+    metadata: Mapping[str, str]
 
 @dataclass(frozen=True, slots=True)
-class MetricSeriesKey:
+class KomariMetricSeriesKey:
     metric_key: str
-    labels: tuple[tuple[str, str], ...]
+    entity_id: str
+    tags: tuple[tuple[str, str], ...]
 
 @dataclass(frozen=True, slots=True)
 class KomariMetricValue:
-    value: int | float | str | None
+    value: float | None
     observed_at: datetime | None
 ```
 
@@ -1123,11 +1126,15 @@ class KomariMetricValue:
 
 1. `public:listMetricDefinitions` 获取定义。
 2. 从定义中排除已由 F12/F13 内置的等价指标，建立 `BUILT_IN_METRIC_KEYS` 去重表。
-3. Options Flow 只展示服务端真实返回、尚未内置的指标。
-4. 用户选择 metric key，并可设置允许的标签过滤；选择项按面板保存在 Entry options。
-5. Coordinator 调用 `public:queryMetrics`，由 API adapter 按当前 RPC 帮助/文档构造参数，并设置时间范围、降采样和最大点数。
-6. 查询结果规范化为 series；取最新有效值或明确规划的窗口统计，不向 HA 导入完整历史时序。
-7. 根据标签中的稳定节点标识决定归属：能可靠映射 node UUID 时归属节点 Device；无节点维度的面板级指标归属面板 Device；无法稳定归属的序列不创建实体并写 diagnostics。
+3. Options Flow 只展示服务端真实返回、尚未内置、受支持且 `retention_days > 0` 的指标。
+4. 用户选择 metric key，并可设置大小写敏感的精确 tag 过滤；选择项按面板保存在
+   Entry options，畸形过滤不会退化成空过滤查询。
+5. Coordinator 调用 `public:queryMetrics` 时固定使用四小时窗口、一个点、`last` 和
+   `fill_empty=false`，并将相同过滤条件的 key 合并请求。
+6. 查询结果规范化为 series；只取最新的非空有限数值，`null` 保留为 unavailable，
+   不向 HA 导入完整历史时序。
+7. 仅当 `entity_id` 是当前可见节点 UUID 时创建节点实体。`labels` 解析后丢弃，不从
+   tags 或 labels 猜测节点；空或未知 `entity_id` 的 series 只计入 diagnostics。
 
 ### 单位与类型映射
 
@@ -1135,34 +1142,42 @@ class KomariMetricValue:
 
 | Komari unit/type | HA 映射 |
 | --- | --- |
-| `%`, percent | `PERCENTAGE`, measurement |
-| bytes | data size, measurement/total 由定义语义决定 |
-| bytes/s | data rate, measurement |
-| ms | duration 毫秒, measurement |
-| °C/celsius | temperature, measurement |
-| count | 普通 measurement |
-| boolean | binary sensor，但必须有明确 true/false 语义 |
-| 未识别单位 | 普通 sensor，不设置 device class 和单位 |
+| gauge | `measurement`；再按单位设置 device class |
+| counter | `total_increasing`；再按单位设置 device class |
+| histogram / summary | 普通数值 sensor，不设置 state class |
+| `%`, percent | `PERCENTAGE` |
+| bytes | data size（bytes） |
+| bytes/s | data rate（bytes/s） |
+| ms | duration（milliseconds） |
+| °C/celsius | temperature（Celsius） |
+| count 或未识别单位 | 不设置 device class 和 unit |
+| 未识别 type | 不可选择 |
 
-只有定义明确说明是单调累计值时才使用 `TOTAL_INCREASING`。不能仅因为单位是 bytes 就推断状态类型。
+不能接受 string 或 boolean Metric value。只有 `counter` 使用 `TOTAL_INCREASING`；不能
+仅因为单位是 bytes 就推断状态类型。
 
 ### 稳定身份
 
-标签先按键排序并进行规范化 JSON 编码，再计算 SHA-256 截断摘要：
+tags 先按键排序并进行规范化编码，再计算完整 SHA-256：
 
 ```text
-tag_hash = sha256(canonical_labels).hexdigest()[:16]
+{entry_id}:node:{node_uuid}:metric:{percent_encoded_metric_key}:{sha256(canonical_tags)}
 ```
 
-unique ID 包含 metric key 和 tag hash；标签显示顺序、任务名称或节点名称变化不影响身份。发生极低概率摘要冲突时，平台在添加前比较完整 canonical labels，并延长摘要或拒绝冲突，不能覆盖已有实体。
+标签显示顺序、Definition description、节点名称和 labels 变化不影响身份；tags 值改变
+代表一个新 series。使用完整摘要而不是短摘要，不需要碰撞扩展分支，且不得覆盖已有
+实体。
 
 ### 实体数量与查询保护
 
 - 默认不选择动态指标。
-- 设置每 Entry 最大 metric keys、series 和实体总数。
-- 查询必须带服务端降采样或最大点数；结果超过上限立即截断并发出 diagnostics/Repair，不把全部点写入状态属性。
-- 同一 metric key 的高基数标签必须由用户过滤。
-- 轮询默认 5～15 分钟，不跟随 30 秒核心状态全量查询。
+- 限制为每 Entry 8 个 metric key、256 个 Definitions、每响应 512 个 series、每个
+  series 16 个 tags、每 Entry 128 个实体；Metric RPC 响应上限为 2 MiB。
+- Options 预览超过 128 个实体或响应超限时阻止保存；运行时优先保留已知 identity，
+  其余按 canonical identity 排序，并创建 Repair。
+- Series 暂时消失只会 unavailable；Definition 连续三次权威缺失才清理其 registry
+  entities，节点确认删除沿用节点 lifecycle 清理。
+- 轮询默认 10 分钟，可设 300～3600 秒，不跟随 30 秒核心状态全量查询。
 
 ### 生命周期
 
@@ -1204,7 +1219,7 @@ unique ID 包含 metric key 和 tag hash；标签显示顺序、任务名称或�
 | 最新节点状态 | 30 秒 | 15～300 秒 |
 | 节点清单 | 10 分钟 | 固定或按 20 次核心刷新 |
 | Ping 统计 | 5 分钟 | 60～1800 秒 |
-| 动态指标 | 10 分钟 | 300～3600 秒 |
+| 动态指标 | 10 分钟 | 300～3600 秒；只在有有效选择时请求 |
 | 能力、版本、公开设置 | 6 小时 | 低频固定 |
 
 ### 调度实现
@@ -1305,7 +1320,8 @@ Coordinator 抛 `ConfigEntryAuthFailed` 后启动 Reauth：
 ### 测试
 
 - 每个轮询范围边界。
-- Ping/Metric capability 缺失时表单隐藏。
+- Ping capability 暂时缺失时保留既有任务和统计选择；Metric capability 暂时缺失时保留
+  既有选择并提供显式清除开关。
 - 实体数超限阻止保存。
 - Reauth 成功、失败、取消和归属原 Entry。
 - Reconfigure URL 冲突与 TLS 修改。
@@ -1533,14 +1549,16 @@ README 必须说明：
 | 最低支持版本 1.0.7 | 必测 | 必测 | 按能力降级 | 应隐藏 | 必测 |
 | 当前稳定 Komari | 必测 | 必测 | 必测 | 必测 | 必测 |
 
-### 长期稳定性验收
+### 非 24 小时真实验收
 
 - HA 重启、Entry reload、Komari 重启。
 - 断网 10 分钟后恢复。
 - API Key 失效并完成 Reauth。
 - Agent 离线/上线、Agent 重启导致流量计数复位。
 - 节点新增、改名、暂时缺失和确认删除。
-- 至少两个面板运行 24 小时，无请求风暴、重复实体和未回收任务。
+- 记录完整的非 24 小时真实矩阵、HACS 安装/升级/卸载结果和证据等级。
+- 24 小时长稳验收明确排除在 `v0.3.0` 门禁外；保留为未执行，不能在任何文档或
+  Release 中声称通过。
 
 ### 完成标准
 
@@ -1565,7 +1583,7 @@ README 必须说明：
 - `0.1.x`：P1 多面板 MVP。
 - `0.2.x`：F14/F15、Reauth、诊断和生命周期。
 - `0.3.x`：F16 动态指标。
-- `1.0.0`：完成真实环境矩阵、迁移测试和稳定接口承诺。
+- `1.0.0` 不属于本轮范围；本轮只准备 `v0.3.0`，不创建或承诺 `v1.0.0`。
 
 不要为了版本号提前发布未完成的实体；版本升级必须保留 Config Entry、Device 和 Entity identity。
 

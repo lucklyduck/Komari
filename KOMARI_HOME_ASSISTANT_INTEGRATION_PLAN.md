@@ -274,7 +274,7 @@ KomariRuntimeData
 | `load_1m` | measurement | 启用 | `load` |
 | `load_5m` | measurement | 启用 | `load5` |
 | `load_15m` | measurement | 启用 | `load15` |
-| `temperature` | °C, temperature | 有有效值时启用 | `temp`；需处理 0、空值和异常范围 |
+| `temperature` | °C, temperature | 有有效值时启用 | `temp`；当前 legacy RPC 将 `0` 视为缺失哨兵，需处理空值和异常范围 |
 | `network_in` | B/s, data rate | 启用 | `net_in` |
 | `network_out` | B/s, data rate | 启用 | `net_out` |
 | `network_total_up` | bytes, total increasing | 启用 | `net_total_up`；允许 Agent 重启后的计数器复位 |
@@ -311,17 +311,22 @@ KomariRuntimeData
 
 ### 5.5 动态/自定义指标（目标功能，按指标选择实体）
 
-新版本 Komari 可通过 `public:listMetricDefinitions` 和 `public:queryMetrics` 发现指标。目标实例目前返回 21 个定义，包括 `cpu.usage`、`memory.used`、`disk.used`、`net.in.rate`、`ping.latency_ms`、GPU 设备指标等。
+支持完整 Metric capability 的 Komari 可通过 `public:listMetricDefinitions` 和
+`public:queryMetrics` 发现指标。定义数量和可选指标必须以每个面板的实际响应为准，不能
+把某一测试实例的数量或名称写成协议保证。
 
 实现原则：
 
-- 集成必须实现指标定义发现、选择、查询、单位映射和实体增删；服务端不具备相关方法时才隐藏该能力。
+- 集成必须实现指标定义发现、选择、查询、单位映射和实体增删；两个方法必须同时存在。
+  缺少任一个方法时核心监控继续工作，并保留已保存的动态指标选择。
 - 内置核心指标继续使用稳定的 `common:getNodesLatestStatus`，避免重复实体。
-- 仅显示 API 实际返回的指标定义。
-- 用户在 Options Flow 中显式选择动态指标后再创建实体。
-- 根据指标定义中的 `type` 和 `unit` 映射 device class、state class 和单位。
-- 未识别单位的指标保持普通 measurement，不猜测单位。
-- 标签维度可能生成大量实体，应设置总数上限并提供过滤。
+- 仅显示 API 实际返回、受支持、`retention_days > 0` 且未被内置实体覆盖的指标定义。
+- 用户在 Options Flow 中显式选择动态指标、tag 过滤并确认有界预览后再创建实体。
+- `entity_id + tags` 决定 series 身份；`labels` 不参与 identity，也不能用于推断节点。
+- 仅当前可见节点 UUID 的 `entity_id` 可生成节点实体；未知或空 `entity_id` 仅记诊断。
+- 根据定义的 `type` 和 `unit` 白名单映射 device class/state class；未知 unit 不猜测。
+- 标签维度可能生成大量实体，因此强制限制 Definitions、series、tags、响应大小和每 Entry
+  的实体数量，并要求精确过滤以缩小高基数查询。
 
 ## 6. 数据更新设计
 
@@ -337,7 +342,7 @@ KomariRuntimeData
 | 节点清单 | 10 分钟 | 也可在每 20 次状态更新后刷新一次 |
 | 面板版本、公开设置、RPC 方法 | 6 小时或重载时 | 版本变化后重新探测能力 |
 | Ping 聚合 | 5 分钟 | 只请求用户选择的 Ping 任务 |
-| 自定义指标窗口统计 | 5～15 分钟 | 只请求用户选择的指标和标签 |
+| 自定义指标窗口统计 | 默认 10 分钟 | 可设 300～3600 秒；只请求有效选择、当前节点和精确 tag 过滤 |
 
 错误与状态处理：
 

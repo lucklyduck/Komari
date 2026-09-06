@@ -10,7 +10,8 @@
 | 集成 Domain | `komari` |
 | 集成类型 | Home Assistant 自定义 `hub` 集成 |
 | I/O 模型 | `cloud_polling`，全异步，只读 JSON-RPC 2.0 |
-| 当前版本 | `0.2.0-alpha.1` |
+| 最新已发布版本 | `0.2.0-alpha.1` |
+| 当前 checkout 目标 | `v0.3.0`（尚未创建 Release） |
 | Home Assistant 基线 | `2026.8.2+` |
 | Komari 基线 | RPC2 `1.0.7+`，实际功能按 `rpc.methods` 探测 |
 | Python | `3.14.x`，开发脚本固定安装 `3.14.6` |
@@ -508,20 +509,27 @@ ignore 绕过。CI 通过仍然只属于自动化证据，不代表 HACS 真实�
 完整 GitHub Release；仅有标签不能作为已完成发布。仓库 description、topics、Issues
 开关和公开可见性属于 GitHub 侧设置，需要在网页或 GitHub API 中单独确认。
 
-## 20. 尚未实现的功能
+## 20. 当前范围与未实现功能
 
-当前版本不包含以下功能：
+当前开发分支已经实现 F16：Metric Definition 发现、用户选择、精确 tag 过滤、受限
+预览、节点传感器、Repair、诊断与生命周期清理。实现继续演进时必须保持以下不变量：
 
-- F16 动态/自定义 Metric Definition 发现、选择与映射。
+- `entity_id + tags` 是 series 身份，`labels` 不参与身份；不从 tags 或 labels 猜测节点。
+- 只接受有限数值或 `null`，只为当前可见节点的非空 `entity_id` 创建实体。
+- metric key 使用 UTF-8 percent encoding，tags 使用完整 SHA-256；不得改动既有实体 identity。
+- 查询固定为四小时、一个点、`last`、不 fill，并受 2 MiB、Definition、series 和实体
+  数量上限保护。
+- capability、定义或 series 暂时缺失时不得静默清空用户选择；只有三次权威 Definition
+  缺失才清理对应 registry 实体。
+
+当前不包含以下功能：
+
 - HACS 默认仓库收录；当前只提供 HACS 自定义存储库。
 - WebSocket 与 JSON-RPC batch。
 - 完整历史时序导入。
 - HA 本地重建权威账期流量。
 - Home Assistant Core 官方集成提交。
-
-实现 F16 时必须完整处理 definition discovery、内置指标去重、标签 identity、单位
-白名单、series/点数/实体上限、Options 过滤、TTL、三次缺失清理、Diagnostics 和
-Repairs；不要只把 `queryMetrics` 的原始结果直接暴露成实体。
+- 24 小时长稳验收；这项不属于 `v0.3.0` 门禁，不能在发布说明中声称已完成。
 
 ## 21. 交付前检查
 

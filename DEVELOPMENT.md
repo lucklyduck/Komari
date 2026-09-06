@@ -3,8 +3,9 @@
 本文档说明集成开发、协议调试和本地验收流程。安装、配置和常见问题见
 [README](README.md)。
 
-本文对应版本 `0.2.0-alpha.1`，在 P1 多面板监控 MVP 上增加了可配置
-调度、到期与流量限额、Ping 统计、生命周期清理、Diagnostics 和 Repairs。
+最新已发布版本为 `0.2.0-alpha.1`。当前 checkout 正在准备 `v0.3.0`，在 P1 多面板
+监控 MVP 上增加了可配置调度、到期与流量限额、Ping 统计、动态 Metric、生命周期清理、
+Diagnostics 和 Repairs；它尚不是 Release 证据。
 
 每次“添加集成”对应一个独立 Komari 面板（一个 Config Entry）。每个面板在
 Home Assistant 中创建一个服务设备，面板下的每个 Komari 节点创建一个子设备。
@@ -25,6 +26,8 @@ Home Assistant 中创建一个服务设备，面板下的每个 Komari 节点创
 - 到期、续费、计费周期、五种流量限额口径和重置敏感的 Agent 流量计数。
 - 发现并选择 Ping 任务，按节点提供最新延迟、丢包率以及可选的
   min/max/avg/P50/P99/stddev；每个面板最多 256 个 Ping 实体。
+- 发现、选择并受限查询动态 Metric Definitions；按 `entity_id + tags` 建立稳定节点
+  实体，支持精确 tag 过滤、2 MiB 响应上限、128 实体上限及对应 Repairs。
 - 提供不含 URL、Key、IP、UUID、名称、任务目标和真实指标值的 Diagnostics。
 - 为已选 Ping 任务缺失、Ping 实体超限和 HTTPS 关闭 TLS 验证创建可自动清除的
   Repairs。
@@ -155,8 +158,9 @@ bash script/fake-panels
 bash script/smoke-fake-panels
 ```
 
-该检查覆盖共享身份隔离、整面板与 Ping 分支故障、Method Not Found 回退、节点和
-任务增删改名、短延迟以及私有面板 Key 轮换。假面板还提供本地验收控制端点：
+该检查覆盖共享身份隔离、整面板与 Ping/Metric 分支故障、Method Not Found、畸形
+Metric 响应、高基数 Metric 响应、节点和任务增删改名、短延迟以及私有面板 Key
+轮换。假面板还提供本地验收控制端点：
 
 - `POST /_control/fail`：模拟该面板 RPC 故障。
 - `POST /_control/recover`：恢复该面板。
@@ -164,7 +168,13 @@ bash script/smoke-fake-panels
 - `POST /_control/delete-node`、`rename-node`：删除或改名测试节点。
 - `POST /_control/add-task`、`remove-task`、`rename-task`：控制测试 Ping 任务。
 - `POST /_control/fail-ping`、`recover-ping`：只影响 Ping 分支。
+- `POST /_control/fail-metrics`、`recover-metrics`：只影响动态 Metric 分支。
 - `POST /_control/method-not-found`、`restore-method`：模拟首选 Ping 方法失效。
+- `POST /_control/metric-method-not-found`、`restore-metric-method`：模拟动态 Metric
+  查询方法失效。
+- `POST /_control/malformed-metrics`、`restore-metrics`：切换畸形/正常的 Metric 响应。
+- `POST /_control/high-cardinality-metrics`、`restore-metric-cardinality`：切换 129 个
+  series 的高基数 Metric 响应与普通响应。
 - `POST /_control/delay`、`clear-delay`：增加或清除短响应延迟。
 - `POST /_control/rotate-key`：轮换私有 Fake C 的固定脱敏测试 Key。
 
@@ -179,15 +189,16 @@ bash script/smoke-public https://monitor.example.com
 
 ## 暂不支持
 
-动态/自定义指标发现与映射（F16）、HACS 默认仓库收录和 HA Core 提交不属于当前
-阶段。WebSocket、JSON-RPC batch、历史数据全量导入和在 HA 本地重建账期流量也不在
-当前范围内。
+HACS 默认仓库收录和 HA Core 提交不属于当前阶段。WebSocket、JSON-RPC batch、历史
+数据全量导入和在 HA 本地重建账期流量也不在当前范围内。24 小时长稳验收被明确排除
+在 `v0.3.0` 发布门禁外，不能将其标记为通过。
 
-当前为 alpha 开发版本。公开面板只应用于匿名只读兼容性验证；不要在日志、测试
-fixture 或报告中保存面板名称、节点 UUID、地址、任务目标和指标值。生产环境的
-HTTPS 面板应保持 TLS 证书验证启用。
+当前 checkout 正在准备 `v0.3.0`，但尚未创建 Release。公开面板只应用于匿名只读
+兼容性验证；不要在日志、测试 fixture 或报告中保存面板名称、节点 UUID、地址、任务
+目标和指标值。生产环境的 HTTPS 面板应保持 TLS 证书验证启用。
 
 ## 设计文档
 
 - [总体设计与调研](KOMARI_HOME_ASSISTANT_INTEGRATION_PLAN.md)
 - [逐功能代码实现方案](KOMARI_HOME_ASSISTANT_IMPLEMENTATION_PLAN.md)
+- [兼容性验收记录](COMPATIBILITY.md)
