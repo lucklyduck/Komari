@@ -20,6 +20,13 @@ marked **Pending** is not evidence of compatibility.
 | --- | --- | --- | --- | --- |
 | 2026-09-06 | WSL local test environment | Core, Ping, F16 models/API/coordinator/options/entities/repairs/diagnostics | Three consecutive runs passed: 244 tests, 95.22% coverage | Automated |
 | 2026-09-06 | Three local fake RPC2 panels | Shared IDs, Ping and Metric branch isolation, empty/malformed/high-cardinality Metric responses, method-not-found, key rotation | Passed | Automated |
+| 2026-09-07 | GitHub Actions on `6a33abc` | HACS, Hassfest, Ruff, Pyright and Pytest | [Validate passed](https://github.com/lucklyduck/Komari/actions/runs/34049449568) | Automated |
+
+## RC publication
+
+[`v0.3.0-rc.1`](https://github.com/lucklyduck/Komari/releases/tag/v0.3.0-rc.1) was published
+as a GitHub Prerelease from the CI-verified `6a33abc` commit on 2026-09-07. It is a release
+candidate, not evidence that the real matrix or HACS lifecycle checks below passed.
 
 The fake panels are intentionally not a substitute for a real Komari server or a Home
 Assistant UI lifecycle test. They use fixed synthetic node IDs, values and credentials only.

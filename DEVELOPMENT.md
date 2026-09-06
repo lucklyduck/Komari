@@ -3,9 +3,10 @@
 本文档说明集成开发、协议调试和本地验收流程。安装、配置和常见问题见
 [README](README.md)。
 
-最新已发布版本为 `0.2.0-alpha.1`。当前 checkout 的候选版本为 `0.3.0-rc.1`，在 P1
-多面板监控 MVP 上增加了可配置调度、到期与流量限额、Ping 统计、动态 Metric、生命周期
-清理、Diagnostics 和 Repairs；它尚不是 GitHub Prerelease 证据。
+当前候选发布为 [`0.3.0-rc.1`](https://github.com/lucklyduck/Komari/releases/tag/v0.3.0-rc.1)，
+上一版为 `0.2.0-alpha.1`。当前 checkout 在 P1 多面板监控 MVP 上增加了可配置调度、到期
+与流量限额、Ping 统计、动态 Metric、生命周期清理、Diagnostics 和 Repairs；它仍不是稳定版
+发布证据。
 
 每次“添加集成”对应一个独立 Komari 面板（一个 Config Entry）。每个面板在
 Home Assistant 中创建一个服务设备，面板下的每个 Komari 节点创建一个子设备。

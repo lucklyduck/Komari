@@ -63,5 +63,6 @@ the release notes.
 
 - Initial multi-panel Home Assistant custom-integration MVP.
 
+[0.3.0-rc.1]: https://github.com/lucklyduck/Komari/releases/tag/v0.3.0-rc.1
 [0.2.0-alpha.1]: https://github.com/lucklyduck/Komari/compare/v0.1.0-alpha.1...v0.2.0-alpha.1
 [0.1.0-alpha.1]: https://github.com/lucklyduck/Komari/releases/tag/v0.1.0-alpha.1
