@@ -118,7 +118,7 @@ class KomariPingTask:
     kind: str | None
     interval: int | None
     default_on: bool | None
-    clients: frozenset[str]
+    clients: frozenset[str] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,16 +285,7 @@ def parse_ping_tasks(payload: object) -> Mapping[str, KomariPingTask]:
         task_id = _identifier(raw_task.get("id"))
         if task_id is None:
             raise KomariProtocolError("Ping task is missing id")
-        clients = raw_task.get("clients")
-        normalized_clients = (
-            frozenset(
-                client.strip()
-                for client in clients
-                if isinstance(client, str) and client.strip()
-            )
-            if isinstance(clients, list)
-            else frozenset()
-        )
+        normalized_clients = _ping_clients(raw_task)
         tasks[task_id] = KomariPingTask(
             task_id=task_id,
             name=_optional_str(raw_task.get("name")) or f"Ping {task_id}",
@@ -304,6 +295,24 @@ def parse_ping_tasks(payload: object) -> Mapping[str, KomariPingTask]:
             clients=normalized_clients,
         )
     return MappingProxyType(tasks)
+
+
+def _ping_clients(raw: Mapping[str, Any]) -> frozenset[str] | None:
+    """Distinguish an authoritative empty slice from unknown assignments.
+
+    Public tasks project the Go Clients slice directly: both [] and null mean
+    no assigned clients. Missing or partly malformed lists cannot prove that.
+    """
+    if "clients" not in raw:
+        return None
+    clients = raw["clients"]
+    if clients is None:
+        return frozenset()
+    if not isinstance(clients, list) or any(
+        not isinstance(client, str) or not client.strip() for client in clients
+    ):
+        return None
+    return frozenset(client.strip() for client in clients)
 
 
 def parse_metric_definitions(
@@ -668,6 +677,15 @@ def _parse_status(
     raw: Mapping[str, Any],
 ) -> KomariNodeStatus:
     """Normalize one latest-status record."""
+    connections = _optional_non_negative_int(raw.get("connections"))
+    udp_connections = _optional_non_negative_int(raw.get("connections_udp"))
+    tcp_connections = (
+        connections - udp_connections
+        if connections is not None
+        and udp_connections is not None
+        and connections >= udp_connections
+        else None
+    )
     return KomariNodeStatus(
         node_uuid=node_uuid,
         online=online,
@@ -689,8 +707,8 @@ def _parse_status(
         network_total_up=_optional_non_negative_int(raw.get("net_total_up")),
         network_total_down=_optional_non_negative_int(raw.get("net_total_down")),
         process_count=_optional_non_negative_int(raw.get("process")),
-        tcp_connections=_optional_non_negative_int(raw.get("connections")),
-        udp_connections=_optional_non_negative_int(raw.get("connections_udp")),
+        tcp_connections=tcp_connections,
+        udp_connections=udp_connections,
     )
 
 

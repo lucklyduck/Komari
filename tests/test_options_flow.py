@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, patch
@@ -26,18 +27,27 @@ from custom_components.komari.const import (
     METHOD_PUBLIC_PING_RECORDS,
     METHOD_PUBLIC_PING_TASKS,
     METHOD_PUBLIC_QUERY_METRICS,
+    PING_STAT_KEYS,
 )
-from custom_components.komari.coordinator import KomariSnapshot
+from custom_components.komari.coordinator import (
+    BRANCH_INVENTORY,
+    BRANCH_PING_TASKS,
+    KomariBranchState,
+    KomariSnapshot,
+)
 from custom_components.komari.models import (
     KomariMetricSeriesKey,
     KomariMetricValue,
     KomariPanelInfo,
     parse_metric_definitions,
     parse_nodes,
+    parse_ping_metric_stats,
     parse_ping_tasks,
     parse_statuses,
 )
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers import entity_registry as er
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 if TYPE_CHECKING:
@@ -94,6 +104,10 @@ def _snapshot(
         statuses=statuses,
         capabilities=frozenset(capabilities),
         ping_tasks=tasks,
+        branch_states={
+            branch: KomariBranchState(fetched_at=dt_util.utcnow())
+            for branch in (BRANCH_INVENTORY, BRANCH_PING_TASKS)
+        },
     )
 
 
@@ -471,6 +485,273 @@ async def test_entity_estimate_over_limit_blocks_save(hass: HomeAssistant) -> No
     )
     assert result["type"] is FlowResultType.FORM
     assert entry.options == {}
+
+
+@pytest.mark.parametrize("empty", [[], None, ["hidden-node"]])
+async def test_sparse_ping_assignments_and_empty_task_can_be_saved(
+    hass: HomeAssistant,
+    empty: object,
+) -> None:
+    """One assigned node and an empty task need eight entities, not 512."""
+    snapshot = replace(
+        _snapshot(node_count=32),
+        ping_tasks=parse_ping_tasks(
+            [
+                {"id": 0, "clients": ["node-0"]},
+                {"id": 1, "clients": empty, "default_on": True},
+            ]
+        ),
+        branch_states={
+            branch: KomariBranchState(fetched_at=dt_util.utcnow())
+            for branch in (BRANCH_INVENTORY, BRANCH_PING_TASKS)
+        },
+    )
+    entry = _entry(hass, snapshot)
+    result = await _to_ping_tasks(hass, await _start(hass, entry))
+    result = await _configure(hass, result, {CONF_PING_TASK_IDS: ["0", "1"]})
+    result = await _configure(hass, result, {CONF_PING_STAT_KEYS: list(PING_STAT_KEYS)})
+    assert result["errors"] == {}
+    assert result["description_placeholders"]["entity_count"] == "8"
+    with patch.object(
+        hass.config_entries, "async_reload", new=AsyncMock(return_value=True)
+    ) as reload_entry:
+        result = await _configure(hass, result, {"confirm": True})
+        await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    reload_entry.assert_awaited_once_with(entry.entry_id)
+
+
+@pytest.mark.parametrize("count", [255, 256, 257])
+async def test_ping_entity_budget_boundary(hass: HomeAssistant, count: int) -> None:
+    """Single-stat assignments exercise the exact 256-entity boundary."""
+    entry = _entry(hass, _snapshot(node_count=count, task_count=1))
+    result = await _to_ping_tasks(hass, await _start(hass, entry))
+    result = await _configure(hass, result, {CONF_PING_TASK_IDS: ["0"]})
+    result = await _configure(hass, result, {CONF_PING_STAT_KEYS: ["latest"]})
+    assert result["description_placeholders"]["entity_count"] == str(count)
+    assert result["errors"] == (
+        {"base": "too_many_ping_entities"} if count > 256 else {}
+    )
+    with patch.object(
+        hass.config_entries, "async_reload", new=AsyncMock(return_value=True)
+    ):
+        result = await _configure(hass, result, {"confirm": True})
+        await hass.async_block_till_done()
+    assert result["type"] is (
+        FlowResultType.FORM if count > 256 else FlowResultType.CREATE_ENTRY
+    )
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "unknown",
+        "invalid",
+        "stale",
+        "future",
+        "naive",
+        "failed",
+        "unfetched",
+        "absent_state",
+        "grace",
+        "absent_task",
+    ],
+)
+async def test_uncertain_ping_discovery_uses_conservative_budget(
+    hass: HomeAssistant,
+    reason: str,
+) -> None:
+    """Stale or incomplete discovery cannot certify that empty tasks are harmless."""
+    snapshot = replace(
+        _snapshot(node_count=2, task_count=1),
+        ping_tasks=parse_ping_tasks([{"id": 0, "clients": []}]),
+    )
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    state = KomariBranchState(fetched_at=now)
+    states = {BRANCH_INVENTORY: state, BRANCH_PING_TASKS: state}
+    assignment = {"id": 0, "clients": []}
+    if reason == "unknown":
+        assignment = {"id": 0}
+    elif reason == "invalid":
+        assignment = {"id": 0, "clients": ["node-0", False]}
+    elif reason == "stale":
+        states[BRANCH_INVENTORY] = replace(
+            state, fetched_at=now - timedelta(minutes=11)
+        )
+    elif reason == "future":
+        states[BRANCH_PING_TASKS] = replace(
+            state, fetched_at=now + timedelta(seconds=1)
+        )
+    elif reason == "naive":
+        states[BRANCH_PING_TASKS] = replace(state, fetched_at=now.replace(tzinfo=None))
+    elif reason == "failed":
+        states[BRANCH_PING_TASKS] = replace(state, error_category="connection")
+    elif reason == "unfetched":
+        states[BRANCH_PING_TASKS] = KomariBranchState()
+    elif reason == "absent_state":
+        states.pop(BRANCH_INVENTORY)
+    snapshot = replace(
+        snapshot, ping_tasks=parse_ping_tasks([assignment]), branch_states=states
+    )
+    entry = _entry(hass, snapshot, options={CONF_PING_TASK_IDS: ["0"]})
+    coordinator = entry.runtime_data.coordinator
+    if reason == "grace":
+        coordinator.ping_task_missing_counts = {"0": 1}
+    with patch("custom_components.komari.config_flow.dt_util.utcnow", return_value=now):
+        result = await _to_ping_tasks(hass, await _start(hass, entry))
+        result = await _configure(hass, result, {CONF_PING_TASK_IDS: ["0"]})
+        if reason == "absent_task":
+            coordinator.data = replace(
+                snapshot, ping_tasks=parse_ping_tasks([{"id": 1, "clients": []}])
+            )
+        result = await _configure(
+            hass, result, {CONF_PING_STAT_KEYS: ["latest", "loss"]}
+        )
+    assert result["description_placeholders"]["entity_count"] == "4"
+
+
+async def test_ping_budget_unions_history_registry_and_predictions_per_entry(
+    hass: HomeAssistant,
+) -> None:
+    """Retained partial fields are not expanded; historical stats are not discarded."""
+    snapshot = replace(
+        _snapshot(node_count=4, task_count=1),
+        ping_tasks=parse_ping_tasks(
+            [{"id": 0, "clients": ["node-0", "node-0", "hidden"]}]
+        ),
+        ping_stats=parse_ping_metric_stats(
+            {
+                "stats": [
+                    {"entity_id": "node-0", "task_id": 0, "latest": 0},
+                    {"entity_id": "node-1", "task_id": 0, "latest": 1},
+                ]
+            }
+        ),
+    )
+    entries = [_entry(hass, snapshot), _entry(hass, snapshot)]
+    registry = er.async_get(hass)
+    for entry, node_ids in (
+        (entries[0], ["node-0", "node-2"]),
+        (entries[1], ["node-3"]),
+    ):
+        for node_id in node_ids:
+            registry.async_get_or_create(
+                "sensor",
+                DOMAIN,
+                f"{entry.entry_id}:node:{node_id}:ping:0:latest",
+                config_entry=entry,
+                disabled_by=er.RegistryEntryDisabler.USER,
+            )
+    for entry in entries:
+        result = await _to_ping_tasks(hass, await _start(hass, entry))
+        result = await _configure(hass, result, {CONF_PING_TASK_IDS: ["0"]})
+        result = await _configure(
+            hass, result, {CONF_PING_STAT_KEYS: ["latest", "loss"]}
+        )
+        assert result["description_placeholders"]["entity_count"] == "5"
+
+
+@pytest.mark.parametrize("metric_preview", [False, True])
+async def test_ping_budget_rechecked_when_either_confirmation_is_submitted(
+    hass: HomeAssistant,
+    metric_preview: bool,
+) -> None:
+    """A changed inventory cannot slip past either save path's prior estimate."""
+    snapshot, series_key, value = _metric_snapshot()
+    snapshot = replace(
+        snapshot, ping_tasks=parse_ping_tasks([{"id": 0, "clients": ["node-0"]}])
+    )
+    entry = _entry(
+        hass,
+        snapshot,
+        client=SimpleNamespace(
+            async_query_metrics=AsyncMock(return_value={series_key: value})
+        ),
+    )
+    result = await _to_ping_tasks(hass, await _start(hass, entry))
+    result = await _configure(hass, result, {CONF_PING_TASK_IDS: ["0"]})
+    result = await _configure(hass, result, {CONF_PING_STAT_KEYS: ["latest"]})
+    assert result["step_id"] == "metrics"
+    if metric_preview:
+        result = await _configure(hass, result, {CONF_METRIC_KEYS: ["custom.rate"]})
+        result = await _configure(hass, result, {CONF_METRIC_TAG_FILTERS: {}})
+    else:
+        result = await _configure(hass, result, {CONF_METRIC_KEYS: []})
+    assert result["errors"] == {}
+    changed = _snapshot(node_count=257, task_count=1)
+    entry.runtime_data.coordinator.data = replace(
+        snapshot, nodes=changed.nodes, ping_tasks=changed.ping_tasks
+    )
+    result = await _configure(hass, result, {"confirm": True})
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "too_many_ping_entities"}
+    assert entry.options == {}
+
+
+@pytest.mark.parametrize("empty", [[], None])
+async def test_empty_ping_task_can_later_receive_nodes(
+    hass: HomeAssistant,
+    empty: object,
+) -> None:
+    """Known empty assignments remain selectable and do not reserve phantom slots."""
+    snapshot = replace(
+        _snapshot(node_count=32, task_count=1),
+        ping_tasks=parse_ping_tasks([{"id": 0, "clients": empty, "default_on": True}]),
+    )
+    entry = _entry(hass, snapshot)
+    result = await _to_ping_tasks(hass, await _start(hass, entry))
+    result = await _configure(hass, result, {CONF_PING_TASK_IDS: ["0"]})
+    result = await _configure(hass, result, {CONF_PING_STAT_KEYS: list(PING_STAT_KEYS)})
+    assert result["description_placeholders"]["entity_count"] == "0"
+    assert result["errors"] == {}
+
+
+@pytest.mark.parametrize("available", [False, True])
+async def test_ping_budget_filters_deselection_and_confirmed_deletions(
+    hass: HomeAssistant,
+    available: bool,
+) -> None:
+    """Retained identity accounting survives missing runtime and releases removals."""
+    snapshot = replace(
+        _snapshot(), ping_tasks=parse_ping_tasks([{"id": 0, "clients": []}])
+    )
+    entry = _entry(
+        hass,
+        snapshot if available else None,
+        options={CONF_PING_TASK_IDS: ["0"], CONF_PING_STAT_KEYS: ["latest"]},
+    )
+    registry = er.async_get(hass)
+    for node_id, task_id, stat_key in (
+        ("node-0", "0", "latest"),
+        ("node-1", "0", "latest"),
+        ("node-0", "1", "latest"),
+        ("node-0", "0", "loss"),
+    ):
+        registry.async_get_or_create(
+            "sensor",
+            DOMAIN,
+            f"{entry.entry_id}:node:{node_id}:ping:{task_id}:{stat_key}",
+            config_entry=entry,
+        )
+    if available:
+        entry.runtime_data.coordinator.confirmed_removed_node_ids = {"node-1"}
+        entry.runtime_data.coordinator.confirmed_removed_ping_task_ids = {"1"}
+        result = await _to_ping_tasks(hass, await _start(hass, entry))
+        result = await _configure(hass, result, {CONF_PING_TASK_IDS: ["0"]})
+        result = await _configure(hass, result, {CONF_PING_STAT_KEYS: ["latest"]})
+    else:
+        result = await _start(hass, entry)
+        result = await _configure(
+            hass, result, {CONF_SCAN_INTERVAL: 45, CONF_PING_INTERVAL: 600}
+        )
+        result = await _configure(
+            hass,
+            result,
+            {CONF_ENABLE_EXPIRY_ENTITIES: True, CONF_ENABLE_TRAFFIC_ENTITIES: True},
+        )
+    assert result["description_placeholders"]["entity_count"] == (
+        "1" if available else "2"
+    )
 
 
 async def test_metric_options_preview_uses_exact_filters_and_saves_once(

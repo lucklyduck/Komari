@@ -115,7 +115,7 @@
       },
       "confirm": {
         "title": "Confirm Komari options",
-        "description": "This selection can create up to {entity_count} Ping entities. The per-panel limit is {entity_limit}.",
+        "description": "Current assignments, discovered history and retained entities give an estimate of {entity_count} Ping entities. Missing discovery data leaves future counts unknown. The per-panel limit of {entity_limit} also applies to later discoveries.",
         "data": {
           "confirm": "Save and reload this panel"
         }
@@ -314,7 +314,7 @@
     },
     "ping_entity_limit_exceeded": {
       "title": "Komari Ping entity limit exceeded",
-      "description": "**{entry_title}** would create {entity_count} Ping entities, above the per-panel limit of {entity_limit}. Reduce the selected tasks or statistics in the integration options. Excess entities are not created."
+      "description": "**{entry_title}** has {entity_count} retained or discovered Ping entity identities, above the per-panel limit of {entity_limit}. Disabled and historical entities also occupy slots. Reduce the selected tasks or statistics in the integration options. Existing identities are preserved; excess new entities are not created."
     },
     "tls_verification_disabled": {
       "title": "TLS certificate verification is disabled for Komari",

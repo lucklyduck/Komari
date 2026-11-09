@@ -65,23 +65,6 @@ def update_repairs(hass: HomeAssistant, entry: KomariConfigEntry) -> None:
             placeholders={"missing_count": str(len(missing_tasks))},
         )
 
-    potential_ping_entities = sum(
-        key.node_uuid in snapshot.nodes
-        and key.task_id in selected_tasks
-        and key.task_id in snapshot.ping_tasks
-        for key in snapshot.ping_stats
-    ) * len(options.ping_stat_keys)
-    _sync_issue(
-        hass,
-        entry,
-        ISSUE_PING_ENTITY_LIMIT_EXCEEDED,
-        active=potential_ping_entities > MAX_PING_ENTITIES,
-        placeholders={
-            "entity_count": str(potential_ping_entities),
-            "entity_limit": str(MAX_PING_ENTITIES),
-        },
-    )
-
     url = urlsplit(entry.data[CONF_URL])
     _sync_issue(
         hass,
@@ -92,6 +75,25 @@ def update_repairs(hass: HomeAssistant, entry: KomariConfigEntry) -> None:
     )
 
     _update_metric_repairs(hass, entry)
+
+
+def update_ping_entity_limit_repair(
+    hass: HomeAssistant,
+    entry: KomariConfigEntry,
+    *,
+    entity_count: int,
+) -> None:
+    """Report retained and observed Ping identities counted by the platform."""
+    _sync_issue(
+        hass,
+        entry,
+        ISSUE_PING_ENTITY_LIMIT_EXCEEDED,
+        active=entity_count > MAX_PING_ENTITIES,
+        placeholders={
+            "entity_count": str(entity_count),
+            "entity_limit": str(MAX_PING_ENTITIES),
+        },
+    )
 
 
 def update_metric_entity_limit_repair(

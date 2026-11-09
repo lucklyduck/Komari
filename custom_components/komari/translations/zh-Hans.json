@@ -115,7 +115,7 @@
       },
       "confirm": {
         "title": "确认 Komari 选项",
-        "description": "当前选择最多创建 {entity_count} 个 Ping 实体；每个面板上限为 {entity_limit} 个。",
+        "description": "根据当前分配、已发现历史和保留实体，预估为 {entity_count} 个 Ping 实体。缺少发现数据时，后续数量仍未知。每个面板上限为 {entity_limit} 个，后续发现也受此限制。",
         "data": {
           "confirm": "保存并重载当前面板"
         }
@@ -314,7 +314,7 @@
     },
     "ping_entity_limit_exceeded": {
       "title": "Komari Ping 实体数量超过上限",
-      "description": "**{entry_title}** 将创建 {entity_count} 个 Ping 实体，超过每个面板 {entity_limit} 个的上限。请在集成选项中减少任务或统计项；超出部分不会创建。"
+      "description": "**{entry_title}** 已保留或发现 {entity_count} 个 Ping 实体标识，超过每个面板 {entity_limit} 个的上限。禁用和历史实体也占用名额。请在集成选项中减少任务或统计项；已有标识会保留，超出的新实体不会创建。"
     },
     "tls_verification_disabled": {
       "title": "Komari 的 TLS 证书验证已关闭",

@@ -437,7 +437,45 @@ def test_status_values_and_zero_are_preserved() -> None:
     assert status.swap_used == 0
     assert status.memory_used == 4 * 1024**3
     assert status.network_in_rate == 1024
+    assert status.tcp_connections == 8
+    assert status.udp_connections == 2
     assert status.observed_at == datetime(2026, 8, 26, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("array_shape", [False, True])
+@pytest.mark.parametrize(
+    ("counts", "tcp", "udp"),
+    [
+        ({"connections": 13, "connections_udp": 3}, 10, 3),
+        ({"connections": 10, "connections_udp": 0}, 10, 0),
+        ({"connections": 0, "connections_udp": 0}, 0, 0),
+        ({"connections_udp": 3}, None, 3),
+        ({"connections": 13}, None, None),
+        ({"connections": 2, "connections_udp": 3}, None, 3),
+        ({"connections": -1, "connections_udp": 3}, None, 3),
+        ({"connections": True, "connections_udp": 3}, None, 3),
+        ({"connections": "13", "connections_udp": 3}, None, 3),
+        ({"connections": 13.0, "connections_udp": 3}, None, 3),
+        ({"connections": None, "connections_udp": 3}, None, 3),
+        ({"connections": 13, "connections_udp": -1}, None, None),
+        ({"connections": 13, "connections_udp": False}, None, None),
+        ({"connections": 13, "connections_udp": "3"}, None, None),
+        ({"connections": 13, "connections_udp": 3.0}, None, None),
+    ],
+)
+def test_tcp_connections_subtract_udp_without_guessing(
+    counts: dict[str, object], tcp: int | None, udp: int | None, array_shape: bool
+) -> None:
+    """Komari 1.0.7 and 1.6.1 common status uses TCP + UDP as connections.
+
+    Source: 1.0.7/api/jsonRpc/common.go:211 and
+    96cf0f79d8cfdf6cc8be54fd1976bbc026d58f7f/web/rpc/jsonrpc/common.go:389.
+    All inputs are synthetic; malformed counters affect only their own fields.
+    """
+    raw = {"client": NODE_UUID, "online": True, **counts}
+    status = parse_statuses([raw] if array_shape else {NODE_UUID: raw})[NODE_UUID]
+    assert status.tcp_connections == tcp
+    assert status.udp_connections == udp
 
 
 @pytest.mark.parametrize(
@@ -526,6 +564,41 @@ def test_ping_task_and_stats_fixtures_are_normalized() -> None:
     assert first.p99 == 88
     assert second.minimum is None
     assert second.total == 120
+
+
+@pytest.mark.parametrize(
+    ("assignment", "expected"),
+    [
+        ({}, None),
+        ({"clients": None}, frozenset()),
+        ({"clients": []}, frozenset()),
+        (
+            {"clients": [" node-0 ", "node-0", "node-1"]},
+            frozenset({"node-0", "node-1"}),
+        ),
+        ({"clients": "node-0"}, None),
+        ({"clients": {}}, None),
+        ({"clients": True}, None),
+        ({"clients": ["node-0", ""]}, None),
+        ({"clients": ["node-0", "  "]}, None),
+        ({"clients": ["node-0", False]}, None),
+        ({"clients": ["node-0", 1]}, None),
+        ({"clients": ["node-0", None]}, None),
+        ({"clients": ["node-0", {}]}, None),
+        ({"clients": ["node-0", []]}, None),
+    ],
+)
+def test_ping_assignment_empty_and_unknown_are_distinct(
+    assignment: dict[str, object], expected: frozenset[str] | None
+) -> None:
+    """Public task slice projection in 1.4.3/1.6.1 preserves explicit null.
+
+    Source: web/rpc/jsonrpc/public.go, publicGetPublicPingTasks.
+    Missing or partially malformed synthetic assignments stay conservative.
+    """
+    task = parse_ping_tasks([{"id": 1, "name": "Fixture task", **assignment}])["1"]
+    assert task.clients == expected
+    assert task.name == "Fixture task"
 
 
 def test_ping_records_fallback_uses_locked_statistics_algorithms() -> None:

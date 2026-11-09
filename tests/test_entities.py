@@ -619,6 +619,77 @@ async def test_default_disabled_entities_are_registered(hass: HomeAssistant) -> 
         assert hass.states.get(entity_id) is None
 
 
+async def test_tcp_diagnostic_values_reload_and_entry_isolation(
+    hass: HomeAssistant,
+) -> None:
+    """Enabled diagnostics keep their identity and isolate malformed/offline values."""
+    bootstraps = [
+        _bootstrap(
+            status_payloads=[
+                {
+                    **_status_payload(),
+                    "connections": total,
+                    "connections_udp": udp,
+                }
+            ]
+        )
+        for total, udp in ((13, 3), (24, 4))
+    ]
+    entries = [
+        await _setup_entry(hass, bootstrap, url=f"https://counts-{index}.example.test")
+        for index, bootstrap in enumerate(bootstraps)
+    ]
+    registry = er.async_get(hass)
+    entity_ids = []
+    for entry, bootstrap in zip(entries, bootstraps, strict=True):
+        ids = [
+            _entity_id(hass, "sensor", f"{entry.entry_id}:node:{NODE_UUID}:{key}")
+            for key in ("tcp_connections", "udp_connections")
+        ]
+        entity_ids.append(ids)
+        for entity_id in ids:
+            registry.async_update_entity(entity_id, disabled_by=None)
+        with patch(
+            "custom_components.komari.api.KomariApiClient.async_get_bootstrap",
+            new=AsyncMock(return_value=bootstrap),
+        ):
+            assert await hass.config_entries.async_reload(entry.entry_id)
+            await hass.async_block_till_done()
+        assert ids == [
+            _entity_id(hass, "sensor", f"{entry.entry_id}:node:{NODE_UUID}:{key}")
+            for key in ("tcp_connections", "udp_connections")
+        ]
+    assert [_state(hass, entity_id).state for entity_id in entity_ids[0]] == ["10", "3"]
+    assert [_state(hass, entity_id).state for entity_id in entity_ids[1]] == ["20", "4"]
+    coordinator = entries[0].runtime_data.coordinator
+    for counts, expected in (
+        (
+            {"connections": 2, "connections_udp": 3, "online": True},
+            [STATE_UNAVAILABLE, "3"],
+        ),
+        ({"connections": 13, "online": True}, [STATE_UNAVAILABLE, STATE_UNAVAILABLE]),
+        (
+            {"connections": 13, "connections_udp": 3, "online": False},
+            [STATE_UNAVAILABLE, STATE_UNAVAILABLE],
+        ),
+        ({"connections": 0, "connections_udp": 0, "online": True}, ["0", "0"]),
+    ):
+        coordinator.async_set_updated_data(
+            replace(
+                coordinator.data,
+                statuses=parse_statuses([{"client": NODE_UUID, **counts}]),
+            )
+        )
+        await hass.async_block_till_done()
+        assert [
+            _state(hass, entity_id).state for entity_id in entity_ids[0]
+        ] == expected
+        assert [_state(hass, entity_id).state for entity_id in entity_ids[1]] == [
+            "20",
+            "4",
+        ]
+
+
 async def test_device_ownership_and_entity_unique_ids(hass: HomeAssistant) -> None:
     """Panel and node entities attach to their exact entry-scoped devices."""
     entry = await _setup_entry(hass, _bootstrap())
@@ -1763,6 +1834,219 @@ async def test_ping_entity_creation_stops_at_per_entry_limit(
     assert len(ping_entries) == MAX_PING_ENTITIES
 
 
+async def test_ping_reload_reserves_retained_registry_capacity(
+    hass: HomeAssistant,
+) -> None:
+    """A sparse poll after reload cannot grow 256 old registrations to 264."""
+    nodes = [_node_payload(f"capacity-{index}") for index in range(5)]
+    statuses = [_status_payload(node["uuid"]) for node in nodes]
+    tasks = [{"id": index, "clients": []} for index in range(8)]
+    entry = await _setup_ping_entry(
+        hass,
+        task_payloads=tasks,
+        stats_payloads=[
+            {"entity_id": node["uuid"], "task_id": task["id"], "latest": 1}
+            for node in nodes[:4]
+            for task in tasks
+        ],
+        selected_task_ids=[str(index) for index in range(8)],
+        selected_stats=[description.key for description in PING_SENSOR_DESCRIPTIONS],
+        node_payloads=nodes,
+        status_payloads=statuses,
+    )
+    old_unique_id = f"{entry.entry_id}:node:capacity-0:ping:0:latest"
+    old_entity_id = _entity_id(hass, "sensor", old_unique_id)
+    snapshot = entry.runtime_data.coordinator.data
+    sparse_stats = parse_ping_metric_stats(
+        {
+            "stats": [
+                {"entity_id": "capacity-0", "task_id": 0, "latest": 2},
+                {"entity_id": "capacity-4", "task_id": 0, "latest": 3},
+            ]
+        }
+    )
+    with (
+        patch(
+            "custom_components.komari.api.KomariApiClient.async_get_bootstrap",
+            new=AsyncMock(
+                return_value=_bootstrap(
+                    node_payloads=nodes,
+                    status_payloads=statuses,
+                    capabilities=snapshot.capabilities,
+                )
+            ),
+        ),
+        patch(
+            "custom_components.komari.api.KomariApiClient.async_get_ping_tasks",
+            new=AsyncMock(return_value=parse_ping_tasks(tasks)),
+        ),
+        patch(
+            "custom_components.komari.api.KomariApiClient.async_get_ping_stats",
+            new=AsyncMock(return_value=sparse_stats),
+        ),
+    ):
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+
+    registry = er.async_get(hass)
+    ping_entries = [
+        item
+        for item in er.async_entries_for_config_entry(registry, entry.entry_id)
+        if ":ping:" in item.unique_id
+    ]
+    assert len(ping_entries) == 256
+    assert _entity_id(hass, "sensor", old_unique_id) == old_entity_id
+    assert _state(hass, old_entity_id).state == "2.0"
+    assert not any(":node:capacity-4:ping:" in item.unique_id for item in ping_entries)
+    issue = ir.async_get(hass).async_get_issue(
+        DOMAIN, issue_id(entry.entry_id, ISSUE_PING_ENTITY_LIMIT_EXCEEDED)
+    )
+    assert issue is not None
+    assert issue.translation_placeholders is not None
+    assert issue.translation_placeholders["entity_count"] == "264"
+    coordinator = entry.runtime_data.coordinator
+    update_repairs(hass, entry)
+    assert (
+        ir.async_get(hass).async_get_issue(
+            DOMAIN, issue_id(entry.entry_id, ISSUE_PING_ENTITY_LIMIT_EXCEEDED)
+        )
+        is not None
+    )
+    coordinator.async_set_updated_data(replace(coordinator.data, ping_stats={}))
+    await hass.async_block_till_done()
+    assert (
+        ir.async_get(hass).async_get_issue(
+            DOMAIN, issue_id(entry.entry_id, ISSUE_PING_ENTITY_LIMIT_EXCEEDED)
+        )
+        is None
+    )
+    coordinator.async_set_updated_data(
+        replace(coordinator.data, ping_stats=sparse_stats)
+    )
+    await hass.async_block_till_done()
+    assert (
+        ir.async_get(hass).async_get_issue(
+            DOMAIN, issue_id(entry.entry_id, ISSUE_PING_ENTITY_LIMIT_EXCEEDED)
+        )
+        is not None
+    )
+
+
+@pytest.mark.parametrize("existing_count", [255, 256, 257])
+async def test_ping_capacity_includes_disabled_and_legacy_excess_per_entry(
+    hass: HomeAssistant,
+    existing_count: int,
+) -> None:
+    """Disabled history reserves slots; a legacy excess is preserved without growth."""
+    registry = er.async_get(hass)
+    entry = await _setup_ping_entry(
+        hass,
+        task_payloads=[{"id": 0, "clients": []}],
+        stats_payloads=[],
+        selected_task_ids=["0"],
+        selected_stats=["latest"],
+    )
+    for index in range(existing_count):
+        registry.async_get_or_create(
+            "sensor",
+            DOMAIN,
+            f"{entry.entry_id}:node:history-{index}:ping:0:latest",
+            config_entry=entry,
+            disabled_by=er.RegistryEntryDisabler.USER,
+        )
+    other = await _setup_ping_entry(
+        hass,
+        task_payloads=[{"id": 0, "clients": []}],
+        stats_payloads=[{"entity_id": NODE_UUID, "task_id": 0, "latest": 3}],
+        selected_task_ids=["0"],
+        selected_stats=["latest"],
+        url="https://other-capacity.example.test",
+    )
+    stats = parse_ping_metric_stats(
+        {"stats": [{"entity_id": NODE_UUID, "task_id": 0, "latest": 2}]}
+    )
+    coordinator = entry.runtime_data.coordinator
+    for _ in range(2):
+        coordinator.async_set_updated_data(replace(coordinator.data, ping_stats=stats))
+        await hass.async_block_till_done()
+    keys = [
+        item
+        for item in er.async_entries_for_config_entry(registry, entry.entry_id)
+        if ":ping:" in item.unique_id
+    ]
+    assert len(keys) == max(256, existing_count)
+    assert (
+        sum(item.disabled_by is er.RegistryEntryDisabler.USER for item in keys)
+        == existing_count
+    )
+    issue = ir.async_get(hass).async_get_issue(
+        DOMAIN, issue_id(entry.entry_id, ISSUE_PING_ENTITY_LIMIT_EXCEEDED)
+    )
+    assert (issue is not None) is (existing_count >= 256)
+    assert (
+        ir.async_get(hass).async_get_issue(
+            DOMAIN, issue_id(other.entry_id, ISSUE_PING_ENTITY_LIMIT_EXCEEDED)
+        )
+        is None
+    )
+    assert (
+        _state(
+            hass,
+            _entity_id(
+                hass, "sensor", f"{other.entry_id}:node:{NODE_UUID}:ping:0:latest"
+            ),
+        ).state
+        == "3.0"
+    )
+
+
+async def test_empty_ping_task_assignment_can_start_reporting(
+    hass: HomeAssistant,
+) -> None:
+    """A task without clients creates nothing until an actual series arrives."""
+    entry = await _setup_ping_entry(
+        hass,
+        task_payloads=[{"id": 0, "clients": [], "default_on": True}],
+        stats_payloads=[],
+        selected_task_ids=["0"],
+        selected_stats=["latest", "loss"],
+    )
+    registry = er.async_get(hass)
+    assert not any(
+        ":ping:" in item.unique_id
+        for item in er.async_entries_for_config_entry(registry, entry.entry_id)
+    )
+    coordinator = entry.runtime_data.coordinator
+    coordinator.async_set_updated_data(
+        replace(
+            coordinator.data,
+            ping_tasks=parse_ping_tasks([{"id": 0, "clients": [NODE_UUID]}]),
+            ping_stats=parse_ping_metric_stats(
+                {"stats": [{"entity_id": NODE_UUID, "task_id": 0, "latest": 0}]}
+            ),
+        )
+    )
+    await hass.async_block_till_done()
+    assert (
+        _state(
+            hass,
+            _entity_id(
+                hass, "sensor", f"{entry.entry_id}:node:{NODE_UUID}:ping:0:latest"
+            ),
+        ).state
+        == "0.0"
+    )
+    assert (
+        _state(
+            hass,
+            _entity_id(
+                hass, "sensor", f"{entry.entry_id}:node:{NODE_UUID}:ping:0:loss"
+            ),
+        ).state
+        == STATE_UNAVAILABLE
+    )
+
+
 async def test_three_panels_keep_same_ping_identity_inputs_separate(
     hass: HomeAssistant,
 ) -> None:
@@ -2682,7 +2966,30 @@ async def test_ping_limit_repair_uses_actual_series_and_auto_clears(
             CONF_PING_STAT_KEYS: ["latest"],
         },
     )
-    update_repairs(hass, entry)
+    snapshot = entry.runtime_data.coordinator.data
+    with (
+        patch(
+            "custom_components.komari.api.KomariApiClient.async_get_bootstrap",
+            new=AsyncMock(
+                return_value=KomariBootstrapData(
+                    panel=snapshot.panel,
+                    nodes=snapshot.nodes,
+                    statuses=snapshot.statuses,
+                    capabilities=snapshot.capabilities,
+                )
+            ),
+        ),
+        patch(
+            "custom_components.komari.api.KomariApiClient.async_get_ping_tasks",
+            new=AsyncMock(return_value=snapshot.ping_tasks),
+        ),
+        patch(
+            "custom_components.komari.api.KomariApiClient.async_get_ping_stats",
+            new=AsyncMock(return_value=snapshot.ping_stats),
+        ),
+    ):
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
     assert registry.async_get_issue(DOMAIN, repair_id) is None
 
 

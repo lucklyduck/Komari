@@ -35,7 +35,7 @@ from .const import (
     SUPPORTED_DYNAMIC_METRIC_TYPES,
 )
 from .entity import KomariNodeEntity, KomariPanelEntity
-from .lifecycle import metric_identity_from_unique_id
+from .lifecycle import metric_identity_from_unique_id, registry_ping_entity_keys
 from .models import (
     KomariMetricDefinition,
     KomariMetricSeriesKey,
@@ -44,7 +44,8 @@ from .models import (
     TrafficLimitType,
 )
 from .options import get_options
-from .repairs import update_metric_entity_limit_repair
+from .ping import observed_ping_entity_keys, retained_ping_entity_keys
+from .repairs import update_metric_entity_limit_repair, update_ping_entity_limit_repair
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -58,6 +59,7 @@ if TYPE_CHECKING:
     from .coordinator import KomariSnapshot
     from .data import KomariConfigEntry
     from .models import KomariNode, KomariNodeStatus
+    from .ping import PingEntityKey
 
     type SensorValue = StateType | date | datetime | Decimal
 
@@ -1026,8 +1028,57 @@ async def async_setup_entry(
     )
 
     known_entity_keys: set[tuple[str, str]] = set()
-    known_ping_entity_keys: set[tuple[str, str, str]] = set()
+    known_ping_entity_keys: set[PingEntityKey] = set()
     known_metric_entity_keys: set[KomariMetricSeriesKey] = set()
+    ping_descriptions = {
+        description.key: description for description in PING_SENSOR_DESCRIPTIONS
+    }
+
+    @callback
+    def _async_new_ping_entities() -> list[SensorEntity]:
+        """Reserve persisted and pending identities before adding new Ping slots."""
+        removed_nodes = coordinator.confirmed_removed_node_ids
+        removed_tasks = coordinator.confirmed_removed_ping_task_ids
+        selection = {
+            "task_ids": frozenset(options.ping_task_ids),
+            "stat_keys": frozenset(options.ping_stat_keys),
+            "removed_nodes": removed_nodes,
+            "removed_tasks": removed_tasks,
+        }
+        known_ping_entity_keys.intersection_update(
+            retained_ping_entity_keys(known_ping_entity_keys, **selection)
+        )
+        retained = retained_ping_entity_keys(
+            registry_ping_entity_keys(registry, entry.entry_id), **selection
+        )
+        candidates = observed_ping_entity_keys(
+            coordinator.data.ping_stats,
+            node_ids=coordinator.data.nodes.keys() - removed_nodes,
+            task_ids=(
+                frozenset(options.ping_task_ids)
+                & coordinator.data.ping_tasks.keys() - removed_tasks
+            ),
+            stat_keys=options.ping_stat_keys,
+        )
+        occupied = set(retained) | known_ping_entity_keys
+        update_ping_entity_limit_repair(
+            hass, entry, entity_count=len(occupied | candidates)
+        )
+        new_entities: list[SensorEntity] = []
+        for identity in sorted(candidates, key=lambda key: (key not in occupied, key)):
+            if identity in known_ping_entity_keys:
+                continue
+            if identity not in occupied and len(occupied) >= MAX_PING_ENTITIES:
+                continue
+            occupied.add(identity)
+            known_ping_entity_keys.add(identity)
+            node_uuid, task_id, stat_key = identity
+            new_entities.append(
+                KomariNodePingSensor(
+                    entry, node_uuid, task_id, ping_descriptions[stat_key]
+                )
+            )
+        return new_entities
 
     @callback
     def _async_add_new_node_entities() -> None:
@@ -1036,12 +1087,6 @@ async def async_setup_entry(
             (node_uuid, key)
             for node_uuid, key in known_entity_keys
             if node_uuid in node_ids
-        )
-        ping_task_ids = frozenset(coordinator.data.ping_tasks)
-        known_ping_entity_keys.intersection_update(
-            (node_uuid, task_id, key)
-            for node_uuid, task_id, key in known_ping_entity_keys
-            if node_uuid in node_ids and task_id in ping_task_ids
         )
         confirmed_removed_metrics = frozenset(coordinator.confirmed_removed_metric_keys)
         known_metric_entity_keys.intersection_update(
@@ -1093,36 +1138,7 @@ async def async_setup_entry(
                     entities.append(
                         KomariNodeTrafficSensor(entry, node_uuid, description)
                     )
-        selected_tasks = frozenset(options.ping_task_ids)
-        selected_stats = frozenset(options.ping_stat_keys)
-        for series_key in coordinator.data.ping_stats:
-            if (
-                series_key.node_uuid not in coordinator.data.nodes
-                or series_key.task_id not in selected_tasks
-                or series_key.task_id not in coordinator.data.ping_tasks
-            ):
-                continue
-            for description in PING_SENSOR_DESCRIPTIONS:
-                entity_key = (
-                    series_key.node_uuid,
-                    series_key.task_id,
-                    description.key,
-                )
-                if (
-                    description.key not in selected_stats
-                    or entity_key in known_ping_entity_keys
-                    or len(known_ping_entity_keys) >= MAX_PING_ENTITIES
-                ):
-                    continue
-                known_ping_entity_keys.add(entity_key)
-                entities.append(
-                    KomariNodePingSensor(
-                        entry,
-                        series_key.node_uuid,
-                        series_key.task_id,
-                        description,
-                    )
-                )
+        entities.extend(_async_new_ping_entities())
 
         selected_metrics = frozenset(options.metric_keys)
         definitions = coordinator.data.metric_definitions

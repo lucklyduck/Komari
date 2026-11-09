@@ -6,6 +6,26 @@ The project follows Semantic Versioning while it remains a custom integration. V
 before `1.0.0` may still introduce breaking changes, which will be called out explicitly in
 the release notes.
 
+## [Unreleased]
+
+### Fixed
+
+- Derive TCP connections from Komari's total minus UDP count. Missing, invalid or
+  contradictory counters leave TCP unknown while preserving a valid independent UDP value.
+- Estimate Ping entities from current assignments, observed history and retained entity
+  identities. Empty tasks no longer inflate sparse configurations; unknown or stale
+  assignments retain conservative estimates.
+- Reserve disabled and historical Ping registrations across reloads, preserve existing
+  identities, and prevent new discoveries from exceeding the per-entry 256-entity budget.
+  The platform now owns the matching Repair count so other listeners cannot overwrite it.
+
+### Upgrade notes
+
+- Entity/device identifiers and stored configuration are unchanged. TCP corrections apply
+  to new observations; historical Home Assistant values are not rewritten.
+- A pre-existing Ping registry above the limit is preserved and reported by Repair; it
+  cannot grow further. Reduce selected tasks or statistics to release registrations.
+
 ## [0.3.0-rc.1] - 2026-09-07
 
 ### Added

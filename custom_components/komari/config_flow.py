@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, override
 
 import voluptuous as vol
@@ -13,6 +14,7 @@ from homeassistant.config_entries import (
     OptionsFlowWithReload,
 )
 from homeassistant.const import CONF_URL, CONF_VERIFY_SSL
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     BooleanSelector,
@@ -28,6 +30,7 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
     TextSelectorType,
 )
+from homeassistant.util import dt as dt_util
 from yarl import URL
 
 from .api import KomariApiClient, select_ping_stats_method
@@ -47,6 +50,7 @@ from .const import (
     DEFAULT_VERIFY_SSL,
     DOMAIN,
     DYNAMIC_METRIC_METHODS,
+    INVENTORY_REFRESH_INTERVAL,
     MAX_METRIC_ENTITIES,
     MAX_METRIC_INTERVAL,
     MAX_METRIC_KEYS,
@@ -60,8 +64,10 @@ from .const import (
     MIN_SCAN_INTERVAL,
     PING_STAT_KEYS,
     PING_STATS_METHODS,
+    PING_TASK_REFRESH_INTERVAL,
     SUPPORTED_DYNAMIC_METRIC_TYPES,
 )
+from .coordinator import BRANCH_INVENTORY, BRANCH_PING_TASKS
 from .exceptions import (
     KomariAuthenticationError,
     KomariConnectionError,
@@ -71,7 +77,13 @@ from .exceptions import (
     KomariRpcError,
     KomariUnsupportedError,
 )
+from .lifecycle import registry_ping_entity_keys
 from .options import KomariOptions, get_options
+from .ping import (
+    observed_ping_entity_keys,
+    predicted_ping_entity_keys,
+    retained_ping_entity_keys,
+)
 
 if TYPE_CHECKING:
     from .models import KomariBootstrapData
@@ -455,19 +467,62 @@ class KomariOptionsFlow(OptionsFlowWithReload):
         return metric_key
 
     def _ping_entity_estimate(self) -> int:
-        """Estimate only currently discoverable Ping entities."""
+        """Combine predicted assignments, observed series and retained identities."""
         snapshot = self._snapshot
-        if snapshot is None or not self._has_ping():
-            return 0
-        selected_task_count = sum(
-            task_id in snapshot.ping_tasks
-            for task_id in self._selected_values(CONF_PING_TASK_IDS)
+        runtime = getattr(self.config_entry, "runtime_data", None)
+        coordinator = getattr(runtime, "coordinator", None)
+        removed_nodes = getattr(coordinator, "confirmed_removed_node_ids", frozenset())
+        removed_tasks = getattr(
+            coordinator, "confirmed_removed_ping_task_ids", frozenset()
         )
-        return (
-            len(snapshot.nodes)
-            * selected_task_count
-            * len(self._selected_values(CONF_PING_STAT_KEYS))
+        task_ids = frozenset(self._selected_values(CONF_PING_TASK_IDS)) - removed_tasks
+        stat_keys = frozenset(self._selected_values(CONF_PING_STAT_KEYS))
+        retained = retained_ping_entity_keys(
+            registry_ping_entity_keys(
+                er.async_get(self.hass), self.config_entry.entry_id
+            ),
+            task_ids=task_ids,
+            stat_keys=stat_keys,
+            removed_nodes=removed_nodes,
+            removed_tasks=removed_tasks,
         )
+        if snapshot is None:
+            return len(retained)
+        observed = observed_ping_entity_keys(
+            snapshot.ping_stats,
+            node_ids=snapshot.nodes.keys() - removed_nodes,
+            task_ids=task_ids & snapshot.ping_tasks.keys(),
+            stat_keys=stat_keys,
+        )
+        if not self._has_ping():
+            return len(retained | observed)
+
+        now = dt_util.utcnow()
+        assignments_current = True
+        for branch, max_age in (
+            (BRANCH_INVENTORY, INVENTORY_REFRESH_INTERVAL),
+            (BRANCH_PING_TASKS, PING_TASK_REFRESH_INTERVAL),
+        ):
+            state = snapshot.branch_states.get(branch)
+            if (
+                state is None
+                or state.fetched_at is None
+                or state.fetched_at.utcoffset() is None
+                or state.error_category is not None
+                or not timedelta(0) <= now - state.fetched_at <= max_age
+            ):
+                assignments_current = False
+                break
+        missing_counts = getattr(coordinator, "ping_task_missing_counts", {})
+        predicted = predicted_ping_entity_keys(
+            snapshot.ping_tasks,
+            node_ids=snapshot.nodes.keys() - removed_nodes,
+            task_ids=task_ids,
+            stat_keys=stat_keys,
+            assignments_current=assignments_current,
+            missing_tasks={key for key, count in missing_counts.items() if count > 0},
+        )
+        return len(predicted | observed | retained)
 
     async def _async_continue_after_ping(self) -> ConfigFlowResult:
         """Continue into optional Metric configuration after Ping choices."""
@@ -891,7 +946,7 @@ class KomariOptionsFlow(OptionsFlowWithReload):
         self,
         user_input: dict[str, Any] | None = None,
     ) -> ConfigFlowResult:
-        """Preview the maximum Ping entity count and save once."""
+        """Preview the current Ping entity estimate and save once."""
         estimate = self._ping_entity_estimate()
         errors: dict[str, str] = {}
         if estimate > MAX_PING_ENTITIES:

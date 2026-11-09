@@ -7,13 +7,15 @@ from urllib.parse import unquote
 
 from homeassistant.helpers import entity_registry as er
 
-from .const import DOMAIN
+from .const import DOMAIN, PING_STAT_KEYS
 from .device import remove_node_device
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterable
 
     from homeassistant.helpers import device_registry as dr
+
+    from .ping import PingEntityKey
 
 
 def node_uuid_from_identifiers(
@@ -72,6 +74,22 @@ def registry_ping_task_ids(
         for item in er.async_entries_for_config_entry(registry, entry_id)
         if (identity := ping_identity_from_unique_id(entry_id, item.unique_id))
         is not None
+    )
+
+
+def registry_ping_entity_keys(
+    registry: er.EntityRegistry,
+    entry_id: str,
+) -> frozenset[PingEntityKey]:
+    """Read only this entry's Komari Ping sensor identities, including disabled."""
+    return frozenset(
+        identity
+        for item in er.async_entries_for_config_entry(registry, entry_id)
+        if item.domain == "sensor"
+        and item.platform == DOMAIN
+        and (identity := ping_identity_from_unique_id(entry_id, item.unique_id))
+        is not None
+        and identity[2] in PING_STAT_KEYS
     )
 
 
