@@ -22,6 +22,7 @@ marked **Pending** is not evidence of compatibility.
 | 2026-09-06 | Three local fake RPC2 panels | Shared IDs, Ping and Metric branch isolation, empty/malformed/high-cardinality Metric responses, method-not-found, key rotation | Passed | Automated |
 | 2026-09-07 | GitHub Actions on `6a33abc` | HACS, Hassfest, Ruff, Pyright and Pytest | [Validate passed](https://github.com/lucklyduck/Komari/actions/runs/34049449568) | Automated |
 | 2026-11-10 | Ubuntu-22.04 / WSL2, Python 3.14.6, locked HA 2026.8.2 | First-stage TCP correction and Ping assignment/history/registry budgets, boundary/reload/multi-entry/Repair regressions; this fix commit based on `a45a77b` | Ruff passed; Pyright 0 errors/warnings; 325 tests passed, 95.52% coverage including branches | Automated |
+| 2026-11-10 | Same locked WSL2 environment | Pre-merge review of `36df59a`; restore statistic priority at partial Ping capacity and check committed documentation targets | Ruff passed; Pyright 0 errors/warnings; 326 tests passed, 95.52% coverage including branches | Automated |
 
 The first-stage run used synthetic data and the real HA platform loader inside the test
 suite. It did not run a new GitHub workflow, a live fake-panel smoke, a real panel, HA UI

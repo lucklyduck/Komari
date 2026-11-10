@@ -1033,6 +1033,7 @@ async def async_setup_entry(
     ping_descriptions = {
         description.key: description for description in PING_SENSOR_DESCRIPTIONS
     }
+    ping_stat_order = {key: index for index, key in enumerate(ping_descriptions)}
 
     @callback
     def _async_new_ping_entities() -> list[SensorEntity]:
@@ -1065,7 +1066,15 @@ async def async_setup_entry(
             hass, entry, entity_count=len(occupied | candidates)
         )
         new_entities: list[SensorEntity] = []
-        for identity in sorted(candidates, key=lambda key: (key not in occupied, key)):
+        for identity in sorted(
+            candidates,
+            key=lambda key: (
+                key not in occupied,
+                key[0],
+                key[1],
+                ping_stat_order[key[2]],
+            ),
+        ):
             if identity in known_ping_entity_keys:
                 continue
             if identity not in occupied and len(occupied) >= MAX_PING_ENTITIES:

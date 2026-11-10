@@ -1834,6 +1834,82 @@ async def test_ping_entity_creation_stops_at_per_entry_limit(
     assert len(ping_entries) == MAX_PING_ENTITIES
 
 
+async def test_ping_limit_prioritizes_latest_at_partial_capacity(
+    hass: HomeAssistant,
+) -> None:
+    """The last slot keeps the default latest statistic ahead of optional averages."""
+    nodes = [_node_payload(f"priority-{index}") for index in range(18)]
+    tasks = [
+        {"id": index, "clients": [node["uuid"] for node in nodes]} for index in range(5)
+    ]
+    initial_stats = [
+        {
+            "entity_id": node["uuid"],
+            "task_id": task["id"],
+            "latest": 1,
+            "loss": 0,
+            "avg": 1,
+        }
+        for node in nodes[:17]
+        for task in tasks
+    ]
+    entry = await _setup_ping_entry(
+        hass,
+        task_payloads=tasks,
+        stats_payloads=initial_stats,
+        selected_task_ids=[str(index) for index in range(5)],
+        selected_stats=["latest", "loss", "avg"],
+        node_payloads=nodes,
+        status_payloads=[_status_payload(node["uuid"]) for node in nodes],
+    )
+    registry = er.async_get(hass)
+    assert (
+        sum(
+            ":ping:" in item.unique_id
+            for item in er.async_entries_for_config_entry(registry, entry.entry_id)
+        )
+        == 255
+    )
+    coordinator = entry.runtime_data.coordinator
+    coordinator.async_set_updated_data(
+        replace(
+            coordinator.data,
+            ping_stats=parse_ping_metric_stats(
+                {
+                    "stats": [
+                        *initial_stats,
+                        {
+                            "entity_id": "priority-17",
+                            "task_id": 0,
+                            "latest": 2,
+                            "loss": 0,
+                            "avg": 2,
+                        },
+                    ]
+                }
+            ),
+        )
+    )
+    await hass.async_block_till_done()
+    latest_id = _entity_id(
+        hass, "sensor", f"{entry.entry_id}:node:priority-17:ping:0:latest"
+    )
+    assert _state(hass, latest_id).state == "2.0"
+    assert (
+        registry.async_get_entity_id(
+            "sensor", DOMAIN, f"{entry.entry_id}:node:priority-17:ping:0:avg"
+        )
+        is None
+    )
+    assert (
+        sum(
+            ":ping:" in item.unique_id
+            for item in er.async_entries_for_config_entry(registry, entry.entry_id)
+        )
+        == 256
+    )
+
+
 async def test_ping_reload_reserves_retained_registry_capacity(
     hass: HomeAssistant,
 ) -> None:

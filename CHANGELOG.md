@@ -18,6 +18,8 @@ the release notes.
 - Reserve disabled and historical Ping registrations across reloads, preserve existing
   identities, and prevent new discoveries from exceeding the per-entry 256-entity budget.
   The platform now owns the matching Repair count so other listeners cannot overwrite it.
+- Preserve the original Ping statistic priority when a new series only fits partially,
+  keeping latest latency and packet loss ahead of optional statistics.
 
 ### Upgrade notes
 
