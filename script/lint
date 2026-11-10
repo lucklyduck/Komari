@@ -3,5 +3,5 @@
 set -euo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/_common"
 
-uv run ruff check .
-uv run ruff format --check custom_components tests
+uv run --locked ruff check .
+uv run --locked ruff format --check custom_components tests

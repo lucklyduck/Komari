@@ -3,4 +3,4 @@
 set -euo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/_common"
 
-uv run pyright
+uv run --locked pyright

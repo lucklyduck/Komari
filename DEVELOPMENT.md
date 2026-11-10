@@ -1,7 +1,8 @@
 # Komari Home Assistant 开发与验收指南
 
 本文档说明集成开发、协议调试和本地验收流程。安装、配置和常见问题见
-[README](README.md)。
+[README](README.md)，代理协作约定见 [AGENTS.md](AGENTS.md)，架构细节按需查阅
+[AI_README.md](AI_README.md)。本文件统一维护操作流程，技能只提供任务映射。
 
 当前候选发布为 [`0.3.0-rc.1`](https://github.com/lucklyduck/Komari/releases/tag/v0.3.0-rc.1)，
 上一版为 `0.2.0-alpha.1`。当前 checkout 在 P1 多面板监控 MVP 上增加了可配置调度、到期
@@ -111,10 +112,26 @@ bash script/type-check
 bash script/test
 ```
 
-GitHub 的 `Validate` workflow 会在 push、pull request、每周定时任务和手动触发时
+最后使用 Windows Git 执行 `git diff --check`。纯文档修改的本地检查范围见 AGENTS；
+功能修改运行完整质量门，Pytest 的分支覆盖率门槛保留为 95%。
+
+`bootstrap` 和所有运行脚本使用 `--locked`，锁文件缺失或过期时直接报错，不自动改写
+依赖。确需变更依赖时，在加载 `script/_common` 的 WSL shell 中显式执行 `uv lock`，
+检查锁文件差异，再重新 bootstrap 和运行质量门。
+
+`script/_common` 为 WSL 设置 ext4 下的环境和缓存默认值，同时尊重调用方传入的
+`UV_PROJECT_ENVIRONMENT`、`UV_CACHE_DIR`。CI 使用工作目录下的独立虚拟环境，并复用 setup-uv
+配置的缓存目录。Linux 开发环境也可直接使用这些 Bash 脚本。
+
+GitHub 的 `Validate` workflow 会在 main 分支 push、pull request、每周定时任务和手动触发时
 运行 HACS repository validation、Hassfest、Ruff、Pyright 和 Pytest。HACS 与
 Hassfest validation 不使用 ignore 项；出现失败时应修复仓库或集成元数据，不能只为
 发布而跳过检查。
+
+workflow 使用只读权限、固定 action 提交和执行超时；HACS 结果留在运行日志中，不向
+PR 发评论。不同触发事件不会相互取消，同一事件/ref 的旧运行可被新运行替换。
+Dependabot 每周检查可识别的 Actions 版本更新；HACS/Hassfest 的分支提交需在维护时
+核对上游。两者的 Docker 镜像仍跟随上游，固定包装代码并不冻结验证规则。
 
 ## 版本发布
 
@@ -141,6 +158,7 @@ bash script/develop --log-no-color
 
 开发配置保存在 `$HOME/.local/share/komari-ha/config`，源码会自动链接到其中。
 Web UI 通常位于 <http://127.0.0.1:8123>。
+如果链接位置已存在普通文件或目录，脚本会拒绝覆盖；先检查其中的数据，不要强制删除。
 
 ## 三面板本地验收
 
@@ -187,6 +205,8 @@ bash script/smoke-public https://monitor.example.com
 
 该命令只执行 RPC2 bootstrap 验证，不打印或持久化面板名称、节点 UUID、地址或
 指标值。
+Fake Panel smoke 会调用本地控制端点改变假面板状态，只能用于隔离的测试服务。
+真实响应不能直接复制为 fixture，须替换凭证、名称、地址、身份、任务目标和指标值。
 
 ## 暂不支持
 
@@ -203,3 +223,4 @@ HACS 默认仓库收录和 HA Core 提交不属于当前阶段。WebSocket、JSO
 - [总体设计与调研](KOMARI_HOME_ASSISTANT_INTEGRATION_PLAN.md)
 - [逐功能代码实现方案](KOMARI_HOME_ASSISTANT_IMPLEMENTATION_PLAN.md)
 - [兼容性验收记录](COMPATIBILITY.md)
+- [上游更新审查与逐项处理计划](docs/upstream-update-action-plan.md)

@@ -18,4 +18,4 @@ elif [[ -e "$COMPONENT_LINK" ]]; then
 fi
 
 ln -s "$COMPONENT_SOURCE" "$COMPONENT_LINK"
-exec uv run hass -c "$HA_CONFIG_DIR" "$@"
+exec uv run --locked hass -c "$HA_CONFIG_DIR" "$@"

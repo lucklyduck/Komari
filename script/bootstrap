@@ -11,8 +11,4 @@ fi
 mkdir -p "$KOMARI_DATA_HOME" "$UV_CACHE_DIR"
 uv python install 3.14.6
 
-if [[ -f uv.lock ]]; then
-    uv sync --locked --python 3.14.6
-else
-    uv sync --python 3.14.6
-fi
+uv sync --locked --python 3.14.6
